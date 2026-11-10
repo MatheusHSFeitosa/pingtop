@@ -29,9 +29,23 @@ Você também pode digitar uma faixa ou CIDR pela tecla `a`. No CIDR, o programa
 | a | Adicionar alvo |
 | d | Remover alvo selecionado |
 | PgUp / PgDn | Navegar por página |
+| t | Iniciar ou parar o Tracert do alvo selecionado |
+| Tab | Alternar entre a lista de alvos e a de saltos |
 | m / ? | Abrir ou fechar o menu |
 | q / Esc | Sair (Esc fecha primeiro o menu) |
 
 A perda é acumulada desde a adição do alvo. O gráfico exibe até 60 amostras recentes, ajusta a escala ao maior valor exibido e marca amostras sem latência com `×`. O estado `ERRO` indica falha na execução ou na resolução do alvo e fica fora do cálculo de perda.
+
+## Rota e gráfico
+
+Instale o pacote opcional `traceroute` para usar o Tracert ICMP. Pressione
+`t` para sondar continuamente a rota do alvo selecionado, até 24 saltos.
+Use `Tab` para alternar o foco e as setas para selecionar um salto. A tabela
+mostra o último RTT, a média das amostras recentes e a perda acumulada do
+salto. Cada salto tem seu próprio gráfico. A perda intermediária pode
+refletir limitação de respostas ICMP no roteador.
+
+O gráfico em Braille identifica o IP sondado e o horário local de início
+da última sondagem. Em terminais estreitos, `Tab` troca a lista visível.
 
 Projeto independente. Licença MIT.
