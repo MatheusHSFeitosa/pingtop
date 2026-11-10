@@ -29,6 +29,10 @@ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e 
 | a | Adicionar alvo |
 | d | Remover alvo selecionado |
 | PgUp / PgDn | Navegar por página |
+| `f` ou `/` | Filtrar por IP ou hostname enquanto digita |
+| r | Inverter a ordem dos alvos |
+| s | Alternar entre Todos, Com resposta e Sem resposta |
+| Delete | Limpar filtro de texto |
 | p | Pausar ou retomar o ping contínuo de todos os alvos |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
@@ -44,6 +48,8 @@ alvo e fica fora do cálculo de perda.
 
 - O histórico mostra as respostas mais recentes primeiro e usa colunas de
   horário, sequência, TTL e RTT quando há espaço.
+  As linhas mais antigas perdem intensidade, e os marcadores de falha
+  preservam a cor de alerta.
 - O gráfico desenha duas amostras por célula. O modo Micro usa glifos Braille
   com pixels finos. A forma dos pontos depende da fonte ou do terminal. Em
   Opções, selecione Quadrantes para usar blocos de cantos retos.
@@ -53,12 +59,16 @@ alvo e fica fora do cálculo de perda.
   e o máximo das amostras visíveis. O medidor acompanha o último RTT e esvazia
   quando a sonda fica sem resposta.
 
+Enter confirma o filtro de texto e Esc restaura o filtro anterior. Os alvos
+ocultos continuam sendo sondados. Sem resposta mostra alvos cujo último ping
+expirou.
+
 ## Tracert
 
 Instale o pacote opcional `traceroute` para usar o Tracert ICMP. Pressione
 `t` para sondar continuamente a rota do alvo selecionado, até 24 saltos.
 Use `Tab` para alternar o foco e as setas para selecionar um salto. A tabela
-mostra o número do salto, o nome ou IP e três RTTs por ciclo, em milissegundos.
+mostra o número do salto, o nome ou IP três RTTs por ciclo em milissegundos e a perda acumulada das sondagens por salto.
 `*` indica uma tentativa sem resposta. Cada salto tem seu próprio gráfico.
 
 ## Terminal e aparência

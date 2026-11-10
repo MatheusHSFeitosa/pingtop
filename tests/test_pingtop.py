@@ -195,6 +195,20 @@ class GraphTest(unittest.TestCase):
         self.assertGreater(meter(40.0), meter(None))
         self.assertEqual(meter(None), 0)
 
+    def test_history_fades_metadata_but_preserves_failure_color(self):
+        monitor = APP["Monitor"]("127.0.0.1")
+        for index in range(8):
+            monitor.record("TIMEOUT" if index == 0 else "OK",
+                           None if index == 0 else 42.0, monitor.host, "12:00:00")
+        calls = []
+        with patch.object(curses, "color_pair", side_effect=lambda n: n << 8):
+            APP["draw_history"](lambda *args: calls.append(args), 0, 26, 13, monitor, 4 << 8, 0, True)
+        rows = [call for call in calls if call[2].startswith("12:")]
+        self.assertEqual(len(rows), 8)
+        self.assertTrue(rows[0][3] & curses.A_BOLD)
+        self.assertLess(rows[0][3] & curses.A_COLOR, rows[-1][3] & curses.A_COLOR)
+        self.assertTrue(any(call[2:] == ("×", 4 << 8) for call in calls))
+
     def test_history_shows_newest_reply_first(self):
         pixels = self.render(112, 16, [40.0, 41.1, 42.5])
         stamps = {}
@@ -203,6 +217,21 @@ class GraphTest(unittest.TestCase):
             if prefix.startswith("12:00:"):
                 stamps[row] = prefix
         self.assertEqual(list(stamps.values()), ["12:00:03", "12:00:02", "12:00:01"])
+
+
+class TargetViewTest(unittest.TestCase):
+    def test_status_query_and_reverse_are_combined(self):
+        monitors = [APP["Monitor"](name) for name in ("Router", "router-backup", "other", "router-pending")]
+        for monitor, status, address in zip(
+            monitors, ("OK", "TIMEOUT", "OK", "AGUARDE"),
+            ("192.168.0.1", "192.168.0.2", "192.168.0.3", None),
+        ):
+            monitor.status, monitor.address = status, address
+        visible = APP["visible_targets"]
+        self.assertEqual(visible(monitors, "ROUTER", 0, True), [3, 1, 0])
+        self.assertEqual(visible(monitors, "192.168.0.", 1, True), [2, 0])
+        self.assertEqual(visible(monitors, "router", 2, False), [1])
+        self.assertEqual(visible(monitors, "sem correspondência", 0, False), [])
 
 
 class TerminalSession:
@@ -282,6 +311,21 @@ class TerminalTest(unittest.TestCase):
             terminal.expect("Quadrantes")
             terminal.send(b"\x1bOD")
             terminal.expect("Micro")
+            self.assertEqual(terminal.finish(), 0)
+
+    def test_live_filter_cancel_and_status_switch(self):
+        with TerminalSession(30, 150, "127.0.0.1", "127.0.0.2") as terminal:
+            terminal.expect("Alvos monitorados")
+            terminal.send(b"fxyz")
+            terminal.expect("Nenhum alvo neste filtro.")
+            terminal.send(b"\x1b")
+            terminal.expect("127.0.0.1")
+            terminal.send(b"/127.0.0.2\n")
+            terminal.expect("Filtro:")
+            terminal.send(b"\x1b[3~rs")
+            terminal.expect("Com resposta")
+            terminal.send(b"s")
+            terminal.expect("Nenhum alvo neste filtro.")
             self.assertEqual(terminal.finish(), 0)
 
     def test_toggle_theme_background(self):

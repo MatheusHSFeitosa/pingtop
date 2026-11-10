@@ -110,9 +110,12 @@ def panel(put, y, x, height, width, title, color):
     put(y + height - 1, x, "└" + "─" * (width - 2) + "┘", color)
 
 
-def border_label(put, y, x, title, color, *, bottom=False):
+def border_label(put, y, x, title, color, *, bottom=False, hotkey=False, active=False):
     put(y, x, "┘" if bottom else "┐", color)
-    if title and title[0] in "¹²³⁴":
+    if hotkey:
+        put(y, x + 1, title[0], curses.color_pair(4) | curses.A_BOLD)
+        put(y, x + 2, title[1:], color | curses.A_BOLD if active else 0)
+    elif title and title[0] in "¹²³⁴":
         put(y, x + 1, title[0], color | curses.A_BOLD)
         put(y, x + 2, title[1:], curses.A_BOLD)
     else:
@@ -171,7 +174,10 @@ def rtt_text(value):
     return f"{value:.2f}" if value is not None else "—"
 
 
-def draw_history(put, y, width, height, monitor, red, dim):
+HISTORY_GREYS = (255, 254, 252, 251, 250, 249, 248, 246)
+
+
+def draw_history(put, y, width, height, monitor, red, dim, shaded=False):
     put(y + 1, 2, "Histórico de sondas"[:width], curses.A_BOLD)
     full = width >= 24
     seq_width = min(7, max(4, width - 20))
@@ -187,6 +193,7 @@ def draw_history(put, y, width, height, monitor, red, dim):
         start = 4
     else:
         start = 3
+    capacity = min(len(monitor.log), height - start - 1)
     for row, entry in enumerate(reversed(monitor.log), y + start):
         if row >= y + height - 1:
             break
@@ -201,8 +208,15 @@ def draw_history(put, y, width, height, monitor, red, dim):
             line = f"{stamp} {seq:>{seq_width}} {ttl:>3} {value:>6}"
         else:
             line = f"{stamp}  {value}"
-        style = red if latency is None else (curses.A_BOLD if row == y + start else 0)
+        age = row - y - start
+        shade = age * (len(HISTORY_GREYS) - 1) // max(6, capacity - 1)
+        style = curses.color_pair(15 + shade) if shaded else (
+            curses.A_DIM if shade >= 4 else 0)
+        if age == 0:
+            style |= curses.A_BOLD
         put(row, 2, line[:width], style)
+        if latency is None and len(line) <= width:
+            put(row, 2 + len(line) - len(value), value, red | (curses.A_BOLD if age == 0 else 0))
 
 
 def braille_cell(mask):
@@ -210,7 +224,7 @@ def braille_cell(mask):
     return chr(0x2800 + sum(dot for bit, dot in enumerate(dots) if mask & (1 << bit)))
 
 
-def draw_graph(put, y, width, height, monitor, green, red, dim, graph_mode="Micro"):
+def draw_graph(put, y, width, height, monitor, green, red, dim, graph_mode="Micro", shaded_history=False):
     # The summary floats inside the graph on wide terminals, as in btop's net panel.
     info_width = min(32, max(24 if width >= 66 else 18, width // 4))
     graph_x = info_width + 4
@@ -229,7 +243,7 @@ def draw_graph(put, y, width, height, monitor, green, red, dim, graph_mode="Micr
     peak = max(samples, default=None)
     average = sum(samples) / len(samples) if samples else None
 
-    draw_history(put, y, info_width, height, monitor, red, dim)
+    draw_history(put, y, info_width, height, monitor, red, dim, shaded_history)
     for row in range(y + 1, y + height - 1):
         put(row, graph_x - 1, "│", dim | curses.A_DIM)
     heading = "Variação de RTT" if inset else f"RTT {rtt_text(latest)} ms"
@@ -337,7 +351,7 @@ def draw_menu(put, height, width, view, index, interval, theme, graph_mode, them
         lines = ("a Adicionar  ·  d Remover  ·  t Tracert",
                  "Tab Alternar foco  ·  ↑↓ Selecionar",
                  "PgUp/PgDn Navegar  ·  q Sair",
-                 "p Pausar ou retomar ping")
+                 "p Ping  ·  f Filtro  ·  r Reverter  ·  s Status")
     for row, line in enumerate(lines):
         active = view != "Ajuda" and row == index + (view == "Limpar lista")
         put(y + 4 + row, x + 2, line.ljust(menu_width - 4),
@@ -349,8 +363,23 @@ def draw_menu(put, height, width, view, index, interval, theme, graph_mode, them
     put(y + 9, x + 2, hint, curses.A_DIM)
 
 
+TARGET_STATES = ("Todos", "Com resposta", "Sem resposta")
+
+
+def visible_targets(monitors, query, state, reverse):
+    query = query.casefold()
+    status = (None, "OK", "TIMEOUT")[state]
+    indices = [
+        index for index, monitor in enumerate(monitors)
+        if (status is None or monitor.status == status)
+        and (query in monitor.host.casefold() or query in (monitor.address or "").casefold())
+    ]
+    return indices[::-1] if reverse else indices
+
+
 def draw_dashboard(put, height, width, monitors, selected, interval, message,
-                   hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode="Micro"):
+                   hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode="Micro",
+                   query="", target_state=0, reverse=False, total=None, shaded_history=False):
     cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
     bold = curses.A_BOLD
     if width < 48 or height < 16:
@@ -361,7 +390,9 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     width -= 1
     panel(put, 0, 0, 3, width, "PINGTOP / ICMP", cyan)
     border_label(put, 0, width - 12, "Esc menu", cyan)
-    put(1, 2, f"{len(monitors)} alvos  ·  ping {'ativo' if ping_enabled else 'pausado'}", bold)
+    put(1, 2, f"{len(monitors) if total is None else total} alvos  ·  ping {'ativo' if ping_enabled else 'pausado'}", bold)
+    if width >= 65:
+        border_label(put, 0, width - 26, "ping", cyan, hotkey=True, active=not ping_enabled)
     timing = f"{time.strftime('%H:%M:%S')}  ·  {interval:g} s"
     put(1, width - len(timing) - 2, timing, cyan)
     wide = width >= 95 and height >= 20
@@ -409,13 +440,18 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         title += f" · {chart.address or chart.host}"
     panel(put, chart_y, 0, chart_height, chart_width, title, purple)
     if chart:
-        draw_graph(put, chart_y, chart_width, chart_height, chart, green, red, purple, graph_mode)
+        draw_graph(put, chart_y, chart_width, chart_height, chart, green, red, purple, graph_mode, shaded_history)
     else:
-        put(chart_y + 1, 2, "Pressione a para adicionar um alvo.", yellow)
+        put(chart_y + 1, 2, "Nenhum alvo neste filtro." if total else "Pressione a para adicionar um alvo.", yellow)
 
     if wide or not route_focus:
         panel(put, table_y, table_x, table_height, table_width, "2 Alvos monitorados",
               cyan | (0 if route_focus else bold))
+        border_label(put, table_y, table_x + 23, "filtro", cyan, hotkey=True, active=bool(query))
+        border_label(put, table_y, table_x + 32, "reverter", cyan, hotkey=True, active=reverse)
+        border_label(put, table_y + table_height - 1, table_x + 2,
+                     f"status: {TARGET_STATES[target_state]}", cyan,
+                     bottom=True, hotkey=True, active=target_state != 0)
         position = f" {selected + 1 if monitors else 0}/{len(monitors)} "
         border_label(put, table_y + table_height - 1, table_x + table_width - len(position) - 3, position, cyan, bottom=True)
         name_width = table_width - 31
@@ -440,9 +476,9 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         if hops:
             position = f" {hop_index + 1}/{len(hops)} "
             border_label(put, route_y + route_height - 1, route_x + 2, position, red, bottom=True)
-        name_width = route_width - 30
+        name_width = route_width - 36
         put(route_y + 1, route_x + 2,
-            f"{'Nº':>2} {'HOST / IP':<{name_width}} {'RTT1 ms':>7} {'RTT2 ms':>7} {'RTT3 ms':>7}", bold)
+            f"{'Nº':>2} {'HOST / IP':<{name_width}} {'RTT1 ms':>7} {'RTT2 ms':>7} {'RTT3 ms':>7} {'Perda':>5}", bold)
         visible_hops = route_height - 3 - bool(hops and route_message)
         start = max(0, hop_index - visible_hops + 1)
         for index, (ttl, hop) in enumerate(hops[start:start + visible_hops], start):
@@ -455,8 +491,10 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
             label = hop.route_names
             if len(label) > name_width and hop.address:
                 label = hop.address + (" +" if "," in hop.route_names else "")
+            loss = f"{hop.lost / hop.sent:.0%}" if hop.sent else "—"
+            rtts = " ".join(f"{value:>7}" for value in times)
             put(route_y + 2 + index - start, route_x + 2,
-                f"{ttl:2} {label[:name_width]:<{name_width}} " + " ".join(f"{value:>7}" for value in times), style)
+                f"{ttl:2} {label[:name_width]:<{name_width}} {rtts} {loss:>5}", style)
         if not hops or route_message:
             put(route_y + route_height - 2, route_x + 2,
                 (route_message or "t Iniciar rota")[:route_width - 4], yellow)
@@ -490,7 +528,10 @@ def dashboard(screen, hosts, interval):
     theme_background = True
     backgrounds = {"Discreto": 233, "Drácula": 236, "Nord": 237, "Gruvbox": 235, "Terminal": 0}
 
+    shaded_history = False
+
     def apply_theme(theme):
+        nonlocal shaded_history
         if not curses.has_colors():
             return
         colors = (curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_YELLOW,
@@ -499,6 +540,10 @@ def dashboard(screen, hosts, interval):
         background = -1
         if theme_background:
             background = backgrounds[theme] if curses.COLORS >= 256 else curses.COLOR_BLACK
+        shaded_history = theme_background and curses.COLORS >= 256 and curses.COLOR_PAIRS >= 23
+        if shaded_history:
+            for index, color in enumerate(HISTORY_GREYS, 15):
+                curses.init_pair(index, color, background)
         curses.init_pair(14, curses.COLOR_WHITE if theme_background else -1, background)
         screen.bkgdset(" ", curses.color_pair(14))
         if curses.COLORS >= 256 and palette:
@@ -518,6 +563,10 @@ def dashboard(screen, hosts, interval):
 
     monitors = [Monitor(host) for host in hosts]
     selected = 0
+    query = ""
+    filter_edit = None
+    target_state = 0
+    reverse = False
     next_probe = 0
     ping_enabled = True
     message = ""
@@ -538,7 +587,10 @@ def dashboard(screen, hosts, interval):
                     monitor.update(pool, ping_enabled)
                 next_probe = now + interval
 
-            target = monitors[selected] if monitors and route_enabled else None
+            indices = visible_targets(monitors, query, target_state, reverse)
+            if indices and selected not in indices:
+                selected = indices[0]
+            target = monitors[selected] if indices and route_enabled else None
             if target is not route_target:
                 route_target = target
                 route_generation += 1
@@ -588,14 +640,36 @@ def dashboard(screen, hosts, interval):
             def background(y, x, value, style=0):
                 put(y, x, value, curses.A_DIM if menu else style)
 
-            page = draw_dashboard(background, height, width, monitors, selected, interval, message,
-                                  hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode)
+            view_message = message
+            if filter_edit is not None:
+                view_message = f"Filtro: {query}▏"
+            elif query:
+                view_message = f"{message}  ·  Filtro: {query}" if message else f"Filtro: {query}"
+            view_index = indices.index(selected) if indices else 0
+            page = draw_dashboard(background, height, width, [monitors[i] for i in indices],
+                                  view_index, interval, view_message, hops, hop_index, route_focus,
+                                  route_message, route_enabled, ping_enabled, graph_mode,
+                                  query, target_state, reverse, len(monitors), shaded_history)
             if menu:
                 draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
+                filter_edit = None
                 key = ord("q")
+            if filter_edit is not None:
+                if key == 27:
+                    query, selected = filter_edit
+                    filter_edit = None
+                elif key in (10, 13, curses.KEY_ENTER):
+                    filter_edit = None
+                elif key in (8, 127, curses.KEY_BACKSPACE):
+                    query = query[:-1]
+                elif key == curses.KEY_DC:
+                    query = ""
+                elif 32 <= key <= 126 and len(query) < 253:
+                    query += chr(key)
+                continue
             if key in (ord("m"), ord("?")) and width >= 48 and height >= 16:
                 menu = ("Ajuda" if key == ord("?") else "Menu") if not menu else None
                 menu_index = 0
@@ -622,6 +696,8 @@ def dashboard(screen, hosts, interval):
                                 monitor.pending.cancel()
                         monitors.clear()
                         selected = 0
+                        query = ""
+                        target_state = 0
                         route_enabled = route_focus = False
                         message = "Lista limpa."
                         menu = None
@@ -650,7 +726,19 @@ def dashboard(screen, hosts, interval):
                     if monitor.pending is not None:
                         monitor.pending.cancel()
                 return
-            if key == ord("p"):
+            if key in (ord("f"), ord("/")):
+                filter_edit = (query, selected)
+                route_focus = False
+                message = ""
+            elif key == curses.KEY_DC:
+                query = ""
+            elif key == ord("r"):
+                reverse = not reverse
+                route_focus = False
+            elif key == ord("s"):
+                target_state = (target_state + 1) % len(TARGET_STATES)
+                route_focus = False
+            elif key == ord("p"):
                 ping_enabled = not ping_enabled
                 next_probe = 0
                 if not ping_enabled:
@@ -667,9 +755,9 @@ def dashboard(screen, hosts, interval):
                          curses.KEY_PPAGE: -page, curses.KEY_NPAGE: page}[key]
                 if route_focus and hops:
                     hop_index = max(0, min(len(hops) - 1, hop_index + delta))
-                elif not route_focus and monitors:
-                    selected = max(0, min(len(monitors) - 1, selected + delta))
-            elif key == ord("d") and monitors:
+                elif not route_focus and indices:
+                    selected = indices[max(0, min(len(indices) - 1, view_index + delta))]
+            elif key == ord("d") and indices:
                 route_focus = False
                 removed = monitors.pop(selected)
                 if removed.pending is not None:
