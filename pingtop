@@ -150,8 +150,10 @@ def parse_route(output, stamp):
 def draw_graph(put, y, width, height, monitor, green, red, dim):
     info_width = width // 2
     graph_x = info_width
-    cols = width - graph_x - 3
-    rows = height - 3
+    show_scale = width - graph_x >= 24 and height >= 9
+    scale_width = 9 if show_scale else 0
+    cols = width - graph_x - 3 - scale_width
+    rows = height - (4 if show_scale else 3)
     history = list(monitor.history)[-cols:]
     samples = [value for value in history if value is not None]
     peak = max(samples, default=0)
@@ -166,7 +168,7 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
 
     for row in range(y + 1, y + height - 1):
         put(row, graph_x - 1, "│", dim)
-    border_label(put, y + 1, graph_x + 1, "Gráfico", dim)
+    border_label(put, y + 1, graph_x + 1, "Δ RTT (ms)" if show_scale else "Gráfico", dim)
     put(y + 1, 2, f"IP {ip}"[:info_width - 4], curses.A_BOLD)
     put(y + 2, 2, f"Sonda {monitor.stamp}"[:info_width - 4], dim)
 
@@ -199,12 +201,24 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
         put(y + 3 + row, 2, line[:info_width - 4],
             dim if latency is not None else red)
 
-    # Mirror square pixels around the center of the available rows.
-    half = rows // 2
-    # Plot variation around the lowest RTT with room above and below the trace.
+    # Reserve the middle row for the axis and mirror every plotted cell around it.
+    center = y + 2 + rows // 2
+    half = (rows - 1) // 2
+    graph_left = graph_x + 1
+    put(center, graph_left, "─" * cols, dim | curses.A_DIM)
     span = max(peak - minimum, 1.0)
-    scale = (half - 1) / span
-    start = graph_x + 1 + (cols - len(history)) // 2
+    if show_scale:
+        axis_x = graph_left + cols
+        for row in range(center - half, center + half + 1):
+            put(row, axis_x, "│", dim | curses.A_DIM)
+        for row, label in ((center - half, f"+{span:.1f}"),
+                           (center, "0"),
+                           (center + half, f"−{span:.1f}")):
+            put(row, axis_x, f"┤{label}"[:scale_width], dim)
+        timeline = "antigas ◀" + " " * (cols - 19) + "▶ recentes"
+        if cols >= 19:
+            put(y + height - 2, graph_left, timeline, dim)
+    start = graph_left + (cols - len(history)) // 2
     for index, value in enumerate(history):
         age = min(3, (len(history) - 1 - index) * 4 // len(history))
         style = green
@@ -216,13 +230,15 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
             style |= curses.A_DIM
 
         if value is None:
-            put(y + 2 + rows // 2, start + index, "×", red | (style & curses.A_DIM))
+            put(center, start + index, "×", red | (style & curses.A_DIM))
             continue
 
-        amplitude = round((half - 1) * 0.2 + (value - minimum) * scale * 0.6)
-        for distance in range(amplitude + 1):
-            put(y + 1 + half - distance, start + index, "▪", style)
-            put(y + 2 + rows - half + distance, start + index, "▪", style)
+        amplitude = max(1, round((value - minimum) * half / span)) if half else 0
+        if amplitude == 0:
+            put(center, start + index, "▪", style)
+        for distance in range(1, amplitude + 1):
+            put(center - distance, start + index, "▪", style)
+            put(center + distance, start + index, "▪", style)
 
 
 MENU_ITEMS = ("Opções", "Ajuda", "Limpar lista", "Sair")
