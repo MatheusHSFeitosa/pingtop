@@ -34,6 +34,7 @@ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e 
 | s | Alternar entre Todos, Com resposta e Sem resposta |
 | Delete | Limpar filtro de texto |
 | p | Pausar ou retomar o ping contínuo de todos os alvos |
+| n | Abrir NSLOOKUP |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
 | Esc / m | Abrir o menu principal |
@@ -90,6 +91,14 @@ alvo e fica fora do cálculo de perda.
 Enter confirma o filtro de texto e Esc restaura o filtro anterior. Os alvos
 ocultos continuam sendo sondados. Sem resposta mostra alvos cujo último ping
 expirou.
+
+## NSLOOKUP
+
+Pressione `n` ou clique em **n DNS** para abrir a consulta. O alvo selecionado
+preenche o campo, e Delete limpa o texto. Enter consulta o DNS, as setas
+rolam o resultado e Esc fecha o painel. Domínios retornam registros de
+endereço disponíveis, e IPs fazem consulta reversa. Requer o comando
+`nslookup` (pacote `dnsutils` no Debian/Ubuntu).
 
 ## Tracert
 

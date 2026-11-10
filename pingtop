@@ -97,6 +97,25 @@ def grouped_targets(value, versions=()):
     return [(address, group) for address in addresses]
 
 
+def dns_lookup(host):
+    if not TARGET.fullmatch(host):
+        return ["Informe um hostname ou endereço IP válido."]
+    try:
+        result = subprocess.run(
+            ["nslookup", "-timeout=2", "-retry=1", host],
+            capture_output=True, text=True, errors="replace", timeout=7,
+        )
+    except FileNotFoundError:
+        return ["Instale o nslookup (pacote dnsutils no Debian/Ubuntu)."]
+    except subprocess.TimeoutExpired:
+        return ["O servidor DNS não respondeu a tempo."]
+    except OSError:
+        return ["Não foi possível executar o nslookup."]
+    output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    return ["".join(char for char in line.expandtabs(4) if char.isprintable())
+            for line in output.splitlines()] or [f"Sem saída (código {result.returncode})."]
+
+
 def probe(host):
     stamp = time.strftime("%H:%M:%S")
     try:
@@ -426,6 +445,23 @@ def draw_menu(put, height, width, view, index, interval, theme, graph_mode, them
     put(y + 9, x + 2, hint, curses.A_DIM)
 
 
+def draw_lookup(put, height, width, query, output, offset, busy):
+    if width < 24 or height < 9:
+        return 1
+    box_width, box_height = min(90, width - 4), min(24, height - 2)
+    y, x = (height - box_height) // 2, (width - box_width) // 2
+    accent = curses.color_pair(1)
+    panel(put, y, x, box_height, box_width, "NSLOOKUP / DNS", accent)
+    put(y + 1, x + 2, "Host ou IP: " + query[-(box_width - 17):] + "▏", curses.A_BOLD)
+    lines = ["Consultando DNS…"] if busy else output or ["Digite um domínio ou IP e pressione Enter."]
+    visible = box_height - 4
+    offset = min(offset, max(0, len(lines) - visible))
+    for row, line in enumerate(lines[offset:offset + visible], y + 2):
+        put(row, x + 2, line[:box_width - 4])
+    put(y + box_height - 2, x + 2, "Enter Consultar   ↑↓ Rolar   Esc Fechar"[:box_width - 4], accent)
+    return visible
+
+
 TARGET_STATES = ("Todos", "Com resposta", "Sem resposta")
 
 
@@ -647,6 +683,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         ("Tab", "Foco"),
         ("a", "Adic." if wide else "+"),
         ("d", "Rem." if wide else "−"),
+        ("n", "DNS"),
         ("q", "Sair"),
     )
     x = 1
@@ -712,6 +749,9 @@ def dashboard(screen, hosts, interval, versions=()):
     selected = 0
     query = ""
     filter_edit = None
+    lookup_query = lookup_pending = None
+    lookup_output = []
+    lookup_offset = 0
     target_state = 0
     reverse = False
     next_probe = 0
@@ -726,7 +766,7 @@ def dashboard(screen, hosts, interval, versions=()):
     next_trace = 0
     hops = []
     hop_index = 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool, ThreadPoolExecutor(max_workers=1) as routes:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool, ThreadPoolExecutor(max_workers=1) as routes, ThreadPoolExecutor(max_workers=1) as dns:
         while True:
             now = time.monotonic()
             if now >= next_probe:
@@ -772,6 +812,11 @@ def dashboard(screen, hosts, interval, versions=()):
             if target and route_pending is None and now >= next_trace:
                 route_pending = (route_generation, routes.submit(trace, target.address or target.host))
 
+            if lookup_pending is not None and lookup_pending.done():
+                lookup_output = lookup_pending.result()
+                lookup_pending = None
+                lookup_offset = 0
+
             screen.erase()
             height, width = screen.getmaxyx()
 
@@ -785,7 +830,7 @@ def dashboard(screen, hosts, interval, versions=()):
                 menu = None
 
             def background(y, x, value, style=0):
-                put(y, x, value, curses.A_DIM if menu else style)
+                put(y, x, value, curses.A_DIM if menu or lookup_query is not None else style)
 
             view_message = message
             if filter_edit is not None:
@@ -801,11 +846,37 @@ def dashboard(screen, hosts, interval, versions=()):
             if menu:
                 hits.clear()
                 draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background, hits)
+            if lookup_query is not None:
+                hits.clear()
+                lookup_page = draw_lookup(put, height, width, lookup_query, lookup_output,
+                                          lookup_offset, lookup_pending is not None)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
-                filter_edit = None
+                filter_edit = lookup_query = None
                 key = ord("q")
+            if lookup_query is not None:
+                if key == 27:
+                    lookup_query = None
+                elif key in (10, 13, curses.KEY_ENTER) and lookup_pending is None:
+                    lookup_offset = 0
+                    lookup_pending = dns.submit(dns_lookup, lookup_query.strip())
+                elif key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                    delta = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                             curses.KEY_PPAGE: -lookup_page, curses.KEY_NPAGE: lookup_page}[key]
+                    lookup_offset = max(0, min(len(lookup_output) - lookup_page, lookup_offset + delta))
+                elif key in (8, 127, curses.KEY_BACKSPACE):
+                    lookup_query = lookup_query[:-1]
+                elif key == curses.KEY_DC:
+                    lookup_query = ""
+                elif 32 <= key <= 126 and len(lookup_query) < 253:
+                    lookup_query += chr(key)
+                elif key == curses.KEY_MOUSE:
+                    try:
+                        curses.getmouse()
+                    except curses.error:
+                        pass
+                continue
             if key == curses.KEY_MOUSE:
                 try:
                     _, mx, my, _, buttons = curses.getmouse()
@@ -913,7 +984,17 @@ def dashboard(screen, hosts, interval, versions=()):
                     if monitor.pending is not None:
                         monitor.pending.cancel()
                 return
-            if key in (ord("f"), ord("/")):
+            if key == ord("n") and width >= 24 and height >= 9:
+                if lookup_pending is not None:
+                    message = "A consulta DNS anterior ainda está em andamento."
+                    continue
+                lookup_query = ""
+                if indices:
+                    monitor = monitors[selected]
+                    lookup_query = monitor.group or monitor.host
+                lookup_output = []
+                lookup_offset = 0
+            elif key in (ord("f"), ord("/")):
                 filter_edit = (query, selected)
                 route_focus = False
                 message = ""
