@@ -4,6 +4,7 @@
 import argparse
 import curses
 import ipaddress
+import json
 import re
 import socket
 import subprocess
@@ -11,6 +12,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
 
 TARGET = re.compile(r"[a-zA-Z0-9:][a-zA-Z0-9_.:%-]{0,252}")
@@ -95,6 +97,76 @@ def grouped_targets(value, versions=()):
         numeric = ":" in value or "/" in value or re.fullmatch(r"[0-9.]+(?:-[0-9.]+)?", value)
         group = value.casefold() if versions and not numeric else None
     return [(address, group) for address in addresses]
+
+
+def network_command(*args):
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def local_network():
+    interfaces = json.loads(network_command("ip", "-j", "address", "show") or "[]")
+    routes = [
+        route for family in ("-4", "-6")
+        for route in json.loads(network_command("ip", "-j", family, "route", "show", "default") or "[]")
+    ]
+    gateways = {}
+    for route in sorted(routes, key=lambda route: route.get("metric", 0)):
+        if route.get("dev"):
+            gateways.setdefault(route["dev"], []).append(route.get("gateway", "direto"))
+
+    dns = {}
+    for line in network_command("resolvectl", "dns").splitlines():
+        match = re.match(r"^(?:Global|Link \d+ \(([^)]+)\)):\s*(.*)$", line)
+        if match and match[2]:
+            dns[match[1]] = match[2].split()
+    if not dns:
+        try:
+            resolver = Path("/etc/resolv.conf").read_text(errors="replace")
+        except OSError:
+            resolver = ""
+        dns[None] = re.findall(r"^\s*nameserver\s+(\S+)", resolver, re.MULTILINE)
+
+    interfaces = [interface for interface in interfaces if "LOOPBACK" not in interface.get("flags", ())]
+    interfaces.sort(key=lambda interface: (interface["ifname"] not in gateways,
+                                            "UP" not in interface.get("flags", ())))
+    details = []
+    summary = []
+    for interface in interfaces:
+        name = interface["ifname"]
+        state = "ativa" if "UP" in interface.get("flags", ()) else "inativa"
+        addresses = [
+            (item["family"], f'{item["local"]}/{item["prefixlen"]}')
+            for item in interface.get("addr_info", ()) if item.get("local")
+        ]
+        details.append(f"{name} · {state}")
+        entries = [f"{'IPv4' if family == 'inet' else 'IPv6'}  {address}"
+                   for family, address in addresses]
+        entries += [f"Gateway  {gateway}" for gateway in gateways.get(name, ())]
+        entries += [f"DNS  {server}" for server in dns.get(name, ())]
+        for index, entry in enumerate(entries):
+            branch = "└─" if index == len(entries) - 1 else "├─"
+            details.append(f"  {branch} {entry}")
+        if not summary:
+            summary = [f"{name} · {state}"]
+            for family in ("inet", "inet6"):
+                address = next((address for kind, address in addresses if kind == family), None)
+                if address:
+                    summary.append(f"{'IPv4' if family == 'inet' else 'IPv6'}  {address}")
+            if name in gateways:
+                summary.insert(min(2, len(summary)), f"GW  {gateways[name][0]}")
+            servers = dns.get(name) or dns.get(None)
+            if servers:
+                summary.insert(min(3, len(summary)), f"DNS  {servers[0]}")
+    if dns.get(None):
+        details += ["DNS do sistema", *[f"  {'└─' if index == len(dns[None]) - 1 else '├─'} {server}"
+                                      for index, server in enumerate(dns[None])]]
+        if not summary:
+            summary = [f"DNS  {dns[None][0]}"]
+    return summary, details
 
 
 def dns_lookup(host, server=""):
@@ -529,7 +601,7 @@ def draw_loss_meter(put, row, x, monitor, segments, muted, warning, critical, se
 
 def draw_dashboard(put, height, width, monitors, selected, interval, message,
                    hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode="Micro",
-                   query="", target_state=0, reverse=False, total=None, shaded_history=False, versions=(), hits=None):
+                   query="", target_state=0, reverse=False, total=None, shaded_history=False, versions=(), hits=None, network_summary=()):
     cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
     bold = curses.A_BOLD
     if width < 48 or height < 16:
@@ -574,27 +646,11 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     chart = current_hop if route_focus and current_hop else target
 
     if wide:
-        panel(put, 3, 0, split, details_width, "1 Alvo selecionado", purple)
-        if target:
-            last = target.history[-1] if target.history else None
-            rtt = f"{last:.2f} ms" if last is not None else "—"
-            loss = f"{target.lost / target.sent:.1%}" if target.sent else "—"
-            lines = (
-                (f"ALVO    {target.host}", bold),
-                (f"ESTADO  {target.status}   RTT {rtt}", green if target.status == "OK" else yellow),
-                (f"PERDA   {loss} ({target.lost}/{target.sent})", 0),
-                (f"ENVIOS  {target.sent}   RECEB. {target.sent - target.lost}", 0),
-                (f"PING    {target.stamp}", 0),
-            )
-            details = list(lines)
-            if route_focus and current_hop:
-                for index, (name, address, rtt) in enumerate(current_hop.route_probes, 1):
-                    response = "*" if rtt is None else f"{address} {rtt:.3f} ms"
-                    if name and name != address:
-                        response += f" · {name}"
-                    details.append((f"Sonda {index}  {response}", purple))
-            for row, (line, style) in enumerate(details[:split - 2], 4):
-                put(row, 2, line[:details_width - 4], style)
+        panel(put, 3, 0, split, details_width, "1 Rede local", purple)
+        border_label(put, 3 + split - 1, 2, "i detalhes", purple, bottom=True, hotkey=True)
+        hit(3 + split - 1, 2, 12, "key", ord("i"))
+        for row, line in enumerate(network_summary[:split - 2], 4):
+            put(row, 2, line[:details_width - 4], bold if row == 4 else 0)
     title = f"3 Gráfico / salto {hops[hop_index][0]}" if route_focus and current_hop else "3 Gráfico / alvo"
     if chart:
         title += f" · {chart.address or chart.host}"
@@ -694,6 +750,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         ("a", "Adic." if wide else "+"),
         ("d", "Rem." if wide else "−"),
         ("n", "DNS"),
+        ("i", "Rede"),
         ("q", "Sair"),
     )
     x = 1
@@ -764,6 +821,12 @@ def dashboard(screen, hosts, interval, versions=()):
     lookup_field = 0
     lookup_output = []
     lookup_offset = 0
+    network_open = False
+    network_offset = 0
+    network_pending = None
+    network_summary = ["Lendo configuração…"]
+    network_details = network_summary
+    next_network = 0
     target_state = 0
     reverse = False
     next_probe = 0
@@ -778,7 +841,7 @@ def dashboard(screen, hosts, interval, versions=()):
     next_trace = 0
     hops = []
     hop_index = 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool, ThreadPoolExecutor(max_workers=1) as routes, ThreadPoolExecutor(max_workers=1) as dns:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool, ThreadPoolExecutor(max_workers=1) as routes, ThreadPoolExecutor(max_workers=1) as dns, ThreadPoolExecutor(max_workers=1) as network:
         while True:
             now = time.monotonic()
             if now >= next_probe:
@@ -824,6 +887,18 @@ def dashboard(screen, hosts, interval, versions=()):
             if target and route_pending is None and now >= next_trace:
                 route_pending = (route_generation, routes.submit(trace, target.address or target.host))
 
+            if network_pending is not None and network_pending.done():
+                try:
+                    summary, details = network_pending.result()
+                except (ValueError, KeyError):
+                    summary, details = [], []
+                network_summary = summary or ["Configuração indisponível."]
+                network_details = details or network_summary
+                network_pending = None
+            if network_pending is None and now >= next_network:
+                network_pending = network.submit(local_network)
+                next_network = now + 10
+
             if lookup_pending is not None and lookup_pending.done():
                 lookup_output = lookup_pending.result()
                 lookup_pending = None
@@ -842,7 +917,7 @@ def dashboard(screen, hosts, interval, versions=()):
                 menu = None
 
             def background(y, x, value, style=0):
-                put(y, x, value, curses.A_DIM if menu or lookup_query is not None else style)
+                put(y, x, value, curses.A_DIM if menu or lookup_query is not None or network_open else style)
 
             view_message = message
             if filter_edit is not None:
@@ -854,7 +929,7 @@ def dashboard(screen, hosts, interval, versions=()):
             page = draw_dashboard(background, height, width, [monitors[i] for i in indices],
                                   view_index, interval, view_message, hops, hop_index, route_focus,
                                   route_message, route_enabled, ping_enabled, graph_mode,
-                                  query, target_state, reverse, len(monitors), shaded_history, versions, hits)
+                                  query, target_state, reverse, len(monitors), shaded_history, versions, hits, network_summary)
             if menu:
                 hits.clear()
                 draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background, hits)
@@ -862,11 +937,41 @@ def dashboard(screen, hosts, interval, versions=()):
                 hits.clear()
                 lookup_page = draw_lookup(put, height, width, lookup_query, lookup_server, lookup_field,
                                           lookup_output, lookup_offset, lookup_pending is not None)
+            if network_open and width >= 24 and height >= 9:
+                box_width, box_height = min(100, width - 4), min(28, height - 2)
+                y, x = (height - box_height) // 2, (width - box_width) // 2
+                accent = curses.color_pair(5)
+                panel(put, y, x, box_height, box_width, "Rede local", accent)
+                network_page = box_height - 3
+                network_offset = min(network_offset, max(0, len(network_details) - network_page))
+                for row, line in enumerate(network_details[network_offset:network_offset + network_page], y + 1):
+                    put(row, x + 2, line[:box_width - 4], curses.A_BOLD if not line.startswith(" ") else 0)
+                put(y + box_height - 2, x + 2, "↑↓ Rolar  Esc Fechar"[:box_width - 4], accent)
+            else:
+                network_page = 1
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
                 filter_edit = lookup_query = None
+                network_open = False
                 key = ord("q")
+            if network_open:
+                if key in (27, ord("i")):
+                    network_open = False
+                elif key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                    delta = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                             curses.KEY_PPAGE: -network_page, curses.KEY_NPAGE: network_page}[key]
+                    network_offset = max(0, min(len(network_details) - network_page, network_offset + delta))
+                elif key == curses.KEY_MOUSE:
+                    try:
+                        _, _, _, _, buttons = curses.getmouse()
+                    except curses.error:
+                        continue
+                    if buttons & wheel_up:
+                        network_offset = max(0, network_offset - 1)
+                    elif buttons & wheel_down:
+                        network_offset = min(max(0, len(network_details) - network_page), network_offset + 1)
+                continue
             if lookup_query is not None:
                 if key == 27:
                     lookup_query = None
@@ -1004,7 +1109,10 @@ def dashboard(screen, hosts, interval, versions=()):
                     if monitor.pending is not None:
                         monitor.pending.cancel()
                 return
-            if key == ord("n") and width >= 24 and height >= 9:
+            if key == ord("i") and width >= 24 and height >= 9:
+                network_open = True
+                network_offset = 0
+            elif key == ord("n") and width >= 24 and height >= 9:
                 if lookup_pending is not None:
                     message = "A consulta DNS anterior ainda está em andamento."
                     continue

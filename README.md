@@ -34,6 +34,7 @@ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e 
 | s | Alternar entre Todos, Com resposta e Sem resposta |
 | Delete | Limpar filtro de texto |
 | p | Pausar ou retomar o ping contínuo de todos os alvos |
+| i | Abrir detalhes da rede local |
 | n | Abrir NSLOOKUP |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
@@ -92,6 +93,14 @@ Enter confirma o filtro de texto e Esc restaura o filtro anterior. Os alvos
 ocultos continuam sendo sondados. Sem resposta mostra alvos cujo último ping
 expirou.
 
+## Rede local
+
+O painel mostra a interface prioritária, endereços, gateway e DNS. Pressione
+`i` para abrir a árvore de interfaces, inclusive em terminais estreitos.
+A configuração é atualizada a cada dez segundos. No Linux, os endereços e
+rotas vêm do comando `ip`, e o DNS vem do `resolvectl` ou de
+`/etc/resolv.conf`.
+
 ## NSLOOKUP
 
 Pressione `n` ou clique em **n DNS** para abrir a consulta. O alvo selecionado
@@ -112,7 +121,7 @@ mostra o número do salto, o nome ou IP três RTTs por ciclo em milissegundos e 
 
 ## Terminal e aparência
 
-Em uma janela de pelo menos 96 colunas por 20 linhas, os painéis de detalhes,
+Em uma janela de pelo menos 96 colunas por 20 linhas, os painéis de rede local,
 alvos, histórico/gráfico e Tracert aparecem juntos. A interface compacta
 usa pelo menos 48 colunas por 16 linhas e alterna as listas com `Tab`.
 
