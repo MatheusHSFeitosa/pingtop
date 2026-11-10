@@ -53,7 +53,9 @@ def probe(host):
     address = header[1] if header else None
     match = LATENCY.search(result.stdout)
     if result.returncode == 0 and match:
-        return "OK", float(match[1]), address, stamp
+        reply = re.search(r"^(\d+) bytes from .*?\bttl=(\d+)", result.stdout, re.MULTILINE)
+        details = (int(reply[1]), int(reply[2])) if reply else None
+        return "OK", float(match[1]), address, stamp, details
     return ("TIMEOUT" if result.returncode == 1 else "ERRO"), None, address, stamp
 
 
@@ -70,12 +72,15 @@ class Monitor:
     address: str | None = None
     stamp: str = "—"
 
-    def record(self, status, latency, address, stamp):
+    route_probes: tuple = ()
+    route_names: str = ""
+
+    def record(self, status, latency, address, stamp, details=None):
         self.status = status
         self.address = address or self.address
         self.stamp = stamp
         self.history.append(latency)
-        self.log.append((stamp, latency, status))
+        self.log.append((stamp, latency, status, self.sent + 1, details))
         if status != "ERRO":
             self.sent += 1
             self.lost += status == "TIMEOUT"
@@ -109,8 +114,8 @@ def trace(host):
     stamp = time.strftime("%H:%M:%S")
     try:
         result = subprocess.run(
-            ["traceroute", "-I", "-n", "-q", "1", "-w", "0.5", "-m", "24", "--", host],
-            capture_output=True, text=True, timeout=4, env={"LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+            ["traceroute", "-I", "-q", "3", "-w", "0.5", "-m", "24", "--", host],
+            capture_output=True, text=True, timeout=6, env={"LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
         )
     except FileNotFoundError:
         return [], "Instale o pacote traceroute."
@@ -118,14 +123,28 @@ def trace(host):
         return [], "A sondagem da rota falhou."
     if result.returncode:
         return [], "Falha no traceroute ICMP. Confira as permissões."
+    return parse_route(result.stdout, stamp), ""
+
+
+def parse_route(output, stamp):
     hops = []
-    for line in result.stdout.splitlines():
-        match = re.match(r"^\s*(\d+)\s+(\S+)(?:\s+([\d.]+)\s+ms)?", line)
-        if match:
-            ttl, address, rtt = match.groups()
-            hops.append((int(ttl), address if address != "*" else None,
-                         float(rtt) if rtt is not None else None, stamp))
-    return hops, ""
+    tokens = re.compile(r"([^\s()]+) \(([^()]+)\)|(\d+(?:\.\d+)?) ms|\*")
+    for line in output.splitlines():
+        match = re.match(r"^\s*(\d+)\s+(.*)", line)
+        if not match:
+            continue
+        name = address = None
+        probes = []
+        for token in tokens.finditer(match[2]):
+            if token[1]:
+                name, address = token[1], token[2]
+            elif token[3]:
+                probes.append((name, address, float(token[3])))
+            else:
+                probes.append((None, None, None))
+        if probes:
+            hops.append((int(match[1]), tuple(probes[:3]), stamp))
+    return hops
 
 
 def draw_graph(put, y, width, height, monitor, green, red, dim):
@@ -160,10 +179,20 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
             stats = f"↓{min(samples):.2g} ~{average:.2g} ↑{peak:.2g} ms"
         put(y + height - 2, 2, stats[:info_width - 4], dim)
         log_rows = min(4, height - 5)
-    for row, (stamp, latency, status) in enumerate(list(monitor.log)[-log_rows:]):
+    for row, (stamp, latency, status, sequence, details) in enumerate(list(reversed(monitor.log))[:log_rows]):
         value = f"tempo={latency:.2f} ms" if latency is not None else (
             "sem resposta" if status == "TIMEOUT" else "erro de sondagem")
-        put(y + 3 + row, 2, f"{stamp} {value}"[:info_width - 4],
+        if not monitor.route_probes:
+            if details:
+                size, ttl = details
+                value = f"{size} bytes de {ip}: icmp_seq={sequence} ttl={ttl} {value}"
+            else:
+                value = f"icmp_seq={sequence} {value}"
+        compact = f"#{sequence} T{details[1]} {latency:.2f}ms" if details else value
+        line = f"{stamp} {value}"
+        if len(line) > info_width - 4:
+            line = compact
+        put(y + 3 + row, 2, line[:info_width - 4],
             dim if latency is not None else red)
 
     # Four vertical dots per cell. Plot the same RTT above and below the center.
@@ -279,6 +308,14 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
             last = target.history[-1] if target.history else None
             rtt = f"{last:.2f} ms" if last is not None else "—"
             put(6, 2, f"Último RTT {rtt}  ·  Ping {target.stamp}"[:left - 4])
+        if route_focus and current_hop and split >= 8:
+            for index, (name, address, rtt) in enumerate(current_hop.route_probes, 1):
+                if 6 + index >= 3 + split - 1:
+                    break
+                response = "*" if rtt is None else f"{address} {rtt:.3f} ms"
+                if name and name != address:
+                    response += f" · {name}"
+                put(6 + index, 2, f"Sonda {index}  {response}"[:left - 4], purple)
     title = f"3 Gráfico / salto {hops[hop_index][0]}" if route_focus and current_hop else "3 Gráfico / alvo"
     panel(put, chart_y, 0, chart_height, left, title, purple)
     if chart:
@@ -310,22 +347,23 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         panel(put, route_y, table_x, route_height, right, "4 Tracert / ICMP", red)
         route_action = " t parar " if route_enabled else " t iniciar "
         border_label(put, route_y + route_height - 1, table_x + right - len(route_action) - 3, route_action, red)
-        name_width = right - 29
+        name_width = right - 30
         put(route_y + 1, table_x + 2,
-            f"{'#':>2} {'SALTO':<{name_width}} {'RTT ms':>7} {'Média':>7} {'Perda':>5}", bold)
+            f"{'Nº':>2} {'HOST / IP':<{name_width}} {'RTT1 ms':>7} {'RTT2 ms':>7} {'RTT3 ms':>7}", bold)
         visible_hops = route_height - 3
         start = max(0, hop_index - visible_hops + 1)
         for index, (ttl, hop) in enumerate(hops[start:start + visible_hops], start):
-            samples = [value for value in hop.history if value is not None]
-            last = hop.history[-1]
-            rtt = f"{last:.2f}" if last is not None else "—"
-            average = f"{sum(samples) / len(samples):.2f}" if samples else "—"
-            loss = f"{hop.lost / hop.sent:.0%}"
-            style = green if last is not None else yellow
+            times = [f"{value:.2f}" if value is not None else "*"
+                     for _, _, value in hop.route_probes]
+            times.extend(["—"] * (3 - len(times)))
+            style = green if any(value is not None for _, _, value in hop.route_probes) else yellow
             if route_focus and index == hop_index:
                 style |= curses.A_REVERSE
+            label = hop.route_names
+            if len(label) > name_width and hop.address:
+                label = hop.address + (" +" if "," in hop.route_names else "")
             put(route_y + 2 + index - start, table_x + 2,
-                f"{ttl:2} {hop.host[:name_width]:<{name_width}} {rtt:>7} {average:>7} {loss:>5}", style)
+                f"{ttl:2} {label[:name_width]:<{name_width}} " + " ".join(f"{value:>7}" for value in times), style)
         if not hops or route_message:
             put(route_y + route_height - 2, table_x + 2,
                 (route_message or "t Iniciar rota")[:right - 4], yellow)
@@ -396,11 +434,19 @@ def dashboard(screen, hosts, interval):
                     previous = dict(hops)
                     if results:
                         hops = []
-                        for ttl, address, rtt, stamp in results:
+                        for ttl, probes, stamp in results:
                             old = previous.get(ttl)
+                            address = next((ip for _, ip, _ in probes if ip), None)
                             label = address or (old.host if old else "*")
                             hop = old if old and old.host == label else Monitor(label)
-                            hop.record("OK" if rtt is not None else "TIMEOUT", rtt, address, stamp)
+                            hop.route_probes = probes
+                            labels = dict.fromkeys(
+                                f"{name} ({ip})" if name != ip else ip
+                                for name, ip, _ in probes if ip
+                            )
+                            hop.route_names = ", ".join(labels) or "*"
+                            for _, ip, rtt in probes:
+                                hop.record("OK" if rtt is not None else "TIMEOUT", rtt, address, stamp)
                             hops.append((ttl, hop))
                         hop_index = min(hop_index, len(hops) - 1)
                     next_trace = now + max(1, interval)

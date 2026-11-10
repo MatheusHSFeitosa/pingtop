@@ -43,8 +43,7 @@ A perda é acumulada desde a adição do alvo. O gráfico exibe até 512 amostra
 Instale o pacote opcional `traceroute` para usar o Tracert ICMP. Pressione
 `t` para sondar continuamente a rota do alvo selecionado, até 24 saltos.
 Use `Tab` para alternar o foco e as setas para selecionar um salto. A tabela
-mostra o último RTT, a média das amostras recentes e a perda acumulada do
-salto. Cada salto tem seu próprio gráfico. A perda intermediária pode
+mostra o número do salto, o nome ou IP e três RTTs por ciclo, em milissegundos. `*` indica uma tentativa sem resposta. Cada salto tem seu próprio gráfico. A perda intermediária pode
 refletir limitação de respostas ICMP no roteador.
 
 O gráfico em Braille identifica o IP sondado e o horário local de início
@@ -55,4 +54,4 @@ A curva fica centralizada horizontalmente enquanto preenche a área disponível.
 Projeto independente. Licença MIT.
 
 No menu principal, use as setas e Enter para abrir Opções, Ajuda, Limpar lista ou Sair. Esc volta um nível no menu.
-Em Opções, use ←/→ para alternar entre Discreto, Drácula, Nord, Gruvbox e Terminal ou ajustar o intervalo da sessão. As paletas personalizadas usam terminais de 256 cores. Limpar lista pede confirmação antes de remover todos os alvos. Ao lado da curva espelhada, o painel exibe as últimas sondagens do alvo ou salto, com horário, RTT ou falha.
+Em Opções, use ←/→ para alternar entre Discreto, Drácula, Nord, Gruvbox e Terminal ou ajustar o intervalo da sessão. As paletas personalizadas usam terminais de 256 cores. Limpar lista pede confirmação antes de remover todos os alvos. Ao lado da curva espelhada, o painel exibe as últimas sondagens do alvo ou salto, em ordem decrescente de chegada. O histórico do ping mostra sequência, TTL e RTT, com formato compacto quando a janela é estreita.
