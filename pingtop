@@ -6,11 +6,13 @@ import curses
 import ipaddress
 import os
 import re
+import socket
 import subprocess
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 TARGET = re.compile(r"[a-zA-Z0-9:][a-zA-Z0-9_.:%-]{0,252}")
 LATENCY = re.compile(r"time[=<]([\d.]+)\s*ms")
@@ -98,6 +100,48 @@ def parse_windows_route(output, stamp):
                        (name, address, float(re.search(r"\d+", value)[0])) for value in values)
         hops.append((int(row[1]), probes, stamp))
     return hops
+
+
+def load_targets(value, versions=()):
+    if value.lower().startswith(("http://", "https://")):
+        try:
+            url = urlsplit(value)
+            host = url.hostname
+        except ValueError as error:
+            raise ValueError("URL inválida.") from error
+        if not host or not TARGET.fullmatch(host):
+            raise ValueError("Informe uma URL HTTP(S) com hostname válido.")
+        value = host
+
+    targets = expand_target(value)
+    if not versions:
+        return targets
+
+    addresses = []
+    for target in targets:
+        try:
+            address = ipaddress.ip_address(target)
+        except ValueError:
+            try:
+                answers = socket.getaddrinfo(target, None, type=socket.SOCK_STREAM)
+            except OSError as error:
+                raise ValueError(f"Não foi possível resolver {target}.") from error
+            resolved = {}
+            for family, _, _, _, sockaddr in answers:
+                if family in (socket.AF_INET, socket.AF_INET6):
+                    version = 4 if family == socket.AF_INET else 6
+                    ip = sockaddr[0]
+                    if version == 6 and sockaddr[3] and "%" not in ip:
+                        ip = f"{ip}%{sockaddr[3]}"
+                    resolved.setdefault(version, ip)
+            addresses.extend(resolved[version] for version in versions if version in resolved)
+        else:
+            if address.version in versions:
+                addresses.append(str(address))
+    if not addresses:
+        families = " ou ".join(f"IPv{version}" for version in versions)
+        raise ValueError(f"{value}: sem endereço {families}.")
+    return addresses
 
 
 def probe(host):
@@ -618,7 +662,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     return max(1, visible_hops if route_focus else table_height - 3)
 
 
-def dashboard(screen, hosts, interval):
+def dashboard(screen, hosts, interval, versions=()):
     curses.curs_set(0)
     screen.keypad(True)
     if hasattr(curses, "set_escdelay"):
@@ -890,7 +934,7 @@ def dashboard(screen, hosts, interval):
                     screen.timeout(150)
                 try:
                     existing = {monitor.host for monitor in monitors}
-                    additions = [item for item in expand_target(host) if item not in existing]
+                    additions = [item for item in load_targets(host, versions) if item not in existing]
                     if not additions:
                         message = "Todos os alvos já estão na lista."
                     elif len(monitors) + len(additions) > MAX_TARGETS:
@@ -909,21 +953,24 @@ def dashboard(screen, hosts, interval):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("hosts", nargs="*", metavar="ALVO")
+    parser.add_argument("-4", dest="ipv4", action="store_true", help="sondar IPv4")
+    parser.add_argument("-6", dest="ipv6", action="store_true", help="sondar IPv6")
     parser.add_argument("-i", "--interval", type=float, default=1,
                         help="segundos entre ciclos (0,5 a 60)")
-    args = parser.parse_args()
+    args = parser.parse_intermixed_args()
+    versions = tuple(v for v, enabled in ((4, args.ipv4), (6, args.ipv6)) if enabled)
     if not 0.5 <= args.interval <= 60:
         parser.error("o intervalo deve ficar entre 0,5 e 60 segundos")
     hosts = {}
     try:
         for value in args.hosts:
-            hosts.update(dict.fromkeys(expand_target(value)))
+            hosts.update(dict.fromkeys(load_targets(value, versions)))
             if len(hosts) > MAX_TARGETS:
                 raise ValueError(f"informe até {MAX_TARGETS} alvos")
     except ValueError as error:
         parser.error(str(error))
     try:
-        curses.wrapper(dashboard, hosts, args.interval)
+        curses.wrapper(dashboard, hosts, args.interval, versions)
     except KeyboardInterrupt:
         pass
 

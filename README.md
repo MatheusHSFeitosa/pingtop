@@ -40,6 +40,20 @@ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e 
 | ? | Abrir ou fechar a ajuda |
 | q | Sair |
 
+## IPv4, IPv6 e URLs
+
+```sh
+pingtop -4 https://example.com/
+pingtop -6 https://example.com/
+pingtop -4 -6 https://example.com/
+```
+
+O PINGTOP sonda o hostname da URL por ICMP. Com `-4` ou `-6`, cada
+hostname é resolvido ao carregar e entra no painel com o primeiro IP de
+cada família solicitada que estiver disponível. As duas opções juntas
+geram dois alvos quando houver endereços das duas famílias. As mesmas
+opções se aplicam aos alvos adicionados com `a` durante a sessão.
+
 ## Monitoramento
 
 O ping começa automaticamente. A coluna de perda acumula as sondagens desde
