@@ -284,6 +284,17 @@ class TerminalTest(unittest.TestCase):
             terminal.expect("Micro")
             self.assertEqual(terminal.finish(), 0)
 
+    def test_toggle_theme_background(self):
+        with TerminalSession(30, 150, "127.0.0.1") as terminal:
+            terminal.expect("Alvos monitorados")
+            terminal.send(b"m\n")
+            terminal.expect("Sim")
+            terminal.send(b"\x1bOA\x1bOC")
+            terminal.expect("Não")
+            terminal.send(b"\x1bOC")
+            terminal.expect("Sim")
+            self.assertEqual(terminal.finish(), 0)
+
     def test_resize_and_return_to_dashboard(self):
         with TerminalSession(30, 150, "127.0.0.1") as terminal:
             terminal.expect("Alvos monitorados")

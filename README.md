@@ -70,7 +70,9 @@ usa pelo menos 48 colunas por 16 linhas e alterna as listas com `Tab`.
 No menu principal, use as setas e Enter para abrir Opções, Ajuda, Limpar lista
 ou Sair. Esc volta um nível. Em Opções, use ←/→ para ajustar o intervalo ou
 alternar entre Discreto, Drácula, Nord, Gruvbox e Terminal. As paletas
-personalizadas usam terminais de 256 cores. Limpar lista pede confirmação.
+personalizadas usam terminais de 256 cores. Em **Fundo do tema**, use Sim
+para aplicar o fundo da paleta ou Não para usar o fundo do terminal. Essa
+opção começa em Sim a cada sessão. Limpar lista pede confirmação.
 
 ## Testes
 

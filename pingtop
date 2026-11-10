@@ -313,7 +313,7 @@ THEMES = {
 }
 
 
-def draw_menu(put, height, width, view, index, interval, theme, graph_mode):
+def draw_menu(put, height, width, view, index, interval, theme, graph_mode, theme_background):
     menu_width = min(56, width - 4)
     y, x = (height - 11) // 2, (width - menu_width) // 2
     accent = curses.color_pair(4)
@@ -329,7 +329,8 @@ def draw_menu(put, height, width, view, index, interval, theme, graph_mode):
     elif view == "Opções":
         lines = (f"Intervalo  ‹ {interval:g} s ›",
                  f"Tema       ‹ {theme} ›",
-                 f"Gráfico    ‹ {graph_mode} ›")
+                 f"Gráfico    ‹ {graph_mode} ›",
+                 f"Fundo do tema ‹ {'Sim' if theme_background else 'Não'} ›")
     elif view == "Limpar lista":
         lines = ("Remover todos os alvos desta sessão?", "Cancelar", "Limpar tudo")
     else:
@@ -486,22 +487,30 @@ def dashboard(screen, hosts, interval):
         curses.start_color()
         curses.use_default_colors()
 
+    theme_background = True
+    backgrounds = {"Discreto": 233, "Drácula": 236, "Nord": 237, "Gruvbox": 235, "Terminal": 0}
+
     def apply_theme(theme):
         if not curses.has_colors():
             return
         colors = (curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_YELLOW,
                   curses.COLOR_RED, curses.COLOR_MAGENTA)
         palette, gradient = THEMES[theme]
+        background = -1
+        if theme_background:
+            background = backgrounds[theme] if curses.COLORS >= 256 else curses.COLOR_BLACK
+        curses.init_pair(14, curses.COLOR_WHITE if theme_background else -1, background)
+        screen.bkgdset(" ", curses.color_pair(14))
         if curses.COLORS >= 256 and palette:
             colors = palette
         for index, color in enumerate(colors, 1):
-            curses.init_pair(index, color, -1)
+            curses.init_pair(index, color, background)
         if curses.COLORS >= 256:
             for index, color in enumerate(gradient or (curses.COLOR_GREEN,) * 4, 6):
-                curses.init_pair(index, color, -1)
+                curses.init_pair(index, color, background)
             reverse_gradient = (218, 176, 133, 90) if palette else (curses.COLOR_MAGENTA,) * 4
             for index, color in enumerate(reverse_gradient, 10):
-                curses.init_pair(index, color, -1)
+                curses.init_pair(index, color, background)
 
     graph_mode = "Micro"
     theme = next(iter(THEMES))
@@ -569,6 +578,8 @@ def dashboard(screen, hosts, interval):
 
             def put(y, x, value, style=0):
                 if 0 <= y < height and 0 <= x < width - 1:
+                    if curses.has_colors() and not style & curses.A_COLOR:
+                        style |= curses.color_pair(14)
                     screen.addnstr(y, x, value, width - x - 1, style)
 
             if width < 48 or height < 16:
@@ -580,7 +591,7 @@ def dashboard(screen, hosts, interval):
             page = draw_dashboard(background, height, width, monitors, selected, interval, message,
                                   hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode)
             if menu:
-                draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode)
+                draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
@@ -597,7 +608,7 @@ def dashboard(screen, hosts, interval):
                     menu = None if menu == "Menu" else "Menu"
                     menu_index = 0
                 elif key in (curses.KEY_UP, curses.KEY_DOWN) and menu != "Ajuda":
-                    size = {"Menu": len(MENU_ITEMS), "Opções": 3, "Limpar lista": 2}[menu]
+                    size = {"Menu": len(MENU_ITEMS), "Opções": 4, "Limpar lista": 2}[menu]
                     menu_index = (menu_index + (1 if key == curses.KEY_DOWN else -1)) % size
                 elif key in (10, 13, curses.KEY_ENTER) and menu == "Menu":
                     menu = MENU_ITEMS[menu_index]
@@ -627,8 +638,11 @@ def dashboard(screen, hosts, interval):
                         delta = 1 if key == curses.KEY_RIGHT else -1
                         theme = names[(names.index(theme) + delta) % len(names)]
                         apply_theme(theme)
-                    else:
+                    elif menu_index == 2:
                         graph_mode = "Quadrantes" if graph_mode == "Micro" else "Micro"
+                    else:
+                        theme_background = not theme_background
+                        apply_theme(theme)
                 if key != ord("q"):
                     continue
             if key == ord("q"):
