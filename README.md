@@ -52,7 +52,13 @@ O PINGTOP sonda o hostname da URL por ICMP. Com `-4` ou `-6`, cada
 hostname é resolvido ao carregar e entra no painel com o primeiro IP de
 cada família solicitada que estiver disponível. As duas opções juntas
 geram dois alvos quando houver endereços das duas famílias. As mesmas
-opções se aplicam aos alvos adicionados com `a` durante a sessão.
+opções definem a família inicial para alvos adicionados com `a`. Pressione
+`v` no painel para alternar entre Auto, IPv4, IPv6 e IPv4+IPv6 para as
+próximas inclusões. No modo Auto, URLs carregam as duas famílias disponíveis.
+
+A lista agrupa os IPs sob o hostname da URL. URLs com o mesmo hostname
+compartilham um grupo, pois o caminho e a porta não fazem parte do ping.
+IPs informados diretamente ficam separados.
 
 ## Monitoramento
 

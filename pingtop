@@ -83,6 +83,20 @@ def load_targets(value, versions=()):
     return addresses
 
 
+FAMILIES = {(): "Auto", (4,): "IPv4", (6,): "IPv6", (4, 6): "IPv4+IPv6"}
+
+
+def grouped_targets(value, versions=()):
+    if value.lower().startswith(("http://", "https://")):
+        addresses = load_targets(value, versions or (4, 6))
+        group = urlsplit(value).hostname
+    else:
+        addresses = load_targets(value, versions)
+        numeric = ":" in value or "/" in value or re.fullmatch(r"[0-9.]+(?:-[0-9.]+)?", value)
+        group = value.casefold() if versions and not numeric else None
+    return [(address, group) for address in addresses]
+
+
 def probe(host):
     stamp = time.strftime("%H:%M:%S")
     try:
@@ -124,6 +138,7 @@ class Monitor:
 
     route_probes: tuple = ()
     route_names: str = ""
+    group: str | None = None
 
     def record(self, status, latency, address, stamp, details=None):
         self.status = status
@@ -395,7 +410,8 @@ def draw_menu(put, height, width, view, index, interval, theme, graph_mode, them
         lines = ("a Adicionar  ·  d Remover  ·  t Tracert",
                  "Tab Alternar foco  ·  ↑↓ Selecionar",
                  "PgUp/PgDn Navegar  ·  q Sair",
-                 "p Ping  ·  f Filtro  ·  r Reverter  ·  s Status")
+                 "p Ping · f Filtro · r Reverter · s Status",
+                 "v Família dos novos alvos")
     for row, line in enumerate(lines):
         active = view != "Ajuda" and row == index + (view == "Limpar lista")
         put(y + 4 + row, x + 2, line.ljust(menu_width - 4),
@@ -416,9 +432,29 @@ def visible_targets(monitors, query, state, reverse):
     indices = [
         index for index, monitor in enumerate(monitors)
         if (status is None or monitor.status == status)
-        and (query in monitor.host.casefold() or query in (monitor.address or "").casefold())
+        and any(query in name.casefold() for name in (monitor.host, monitor.address or "", monitor.group or ""))
     ]
-    return indices[::-1] if reverse else indices
+    groups = {}
+    for index in indices:
+        groups.setdefault(monitors[index].group or index, []).append(index)
+    ordered = list(groups.values())
+    if reverse:
+        ordered.reverse()
+    return [index for group in ordered for index in group]
+
+
+def target_tree(monitors, show_headers):
+    rows = []
+    for index, monitor in enumerate(monitors):
+        group = monitor.group
+        if group and show_headers and (index == 0 or monitors[index - 1].group != group):
+            rows.append((None, group))
+        label = monitor.host
+        if group:
+            branch = "├─" if index + 1 < len(monitors) and monitors[index + 1].group == group else "└─"
+            label = f"{branch} {label}" if show_headers else f"{label} · {group}"
+        rows.append((index, label))
+    return rows
 
 
 def loss_meter(lost, sent, segments):
@@ -444,7 +480,7 @@ def draw_loss_meter(put, row, x, monitor, segments, muted, warning, critical, se
 
 def draw_dashboard(put, height, width, monitors, selected, interval, message,
                    hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode="Micro",
-                   query="", target_state=0, reverse=False, total=None, shaded_history=False):
+                   query="", target_state=0, reverse=False, total=None, shaded_history=False, versions=()):
     cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
     bold = curses.A_BOLD
     if width < 48 or height < 16:
@@ -458,6 +494,9 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     put(1, 2, f"{len(monitors) if total is None else total} alvos  ·  ping {'ativo' if ping_enabled else 'pausado'}", bold)
     if width >= 65:
         border_label(put, 0, width - 26, "ping", cyan, hotkey=True, active=not ping_enabled)
+    if width >= 72:
+        family = f"v: {FAMILIES[versions]}"
+        border_label(put, 0, 25, family, cyan, hotkey=True, active=bool(versions))
     timing = f"{time.strftime('%H:%M:%S')}  ·  {interval:g} s"
     put(1, width - len(timing) - 2, timing, cyan)
     wide = width >= 95 and height >= 20
@@ -525,16 +564,21 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         put(table_y + 1, table_x + 2,
             f"{'ALVO':<{name_width}} {'ESTADO':<8} {'RTT':>9} {'PERDA':>{6 + meter_width}}", bold)
         visible = table_height - 3
-        start = max(0, selected - visible + 1)
-        for index, monitor in enumerate(monitors[start:start + visible], start):
+        rows = target_tree(monitors, visible > 1)
+        selected_row = next((row for row, (index, _) in enumerate(rows) if index == selected), 0)
+        start = max(0, selected_row - visible + 1)
+        for row, (index, label) in enumerate(rows[start:start + visible], table_y + 2):
+            if index is None:
+                put(row, table_x + 2, label[:name_width], cyan | bold)
+                continue
+            monitor = monitors[index]
             style = {"OK": green, "AGUARDE": yellow}.get(monitor.status, red)
             if index == selected:
                 style |= curses.A_REVERSE
             last = monitor.history[-1] if monitor.history else None
             latency = f"{last:.2f} ms" if last is not None else "—"
             loss = f"{monitor.lost / monitor.sent:.0%}" if monitor.sent else "—"
-            row = table_y + 2 + index - start
-            prefix = f"{monitor.host[:name_width]:<{name_width}} {monitor.status:<8} {latency:>9} "
+            prefix = f"{label[:name_width]:<{name_width}} {monitor.status:<8} {latency:>9} "
             put(row, table_x + 2, prefix + " " * meter_width + f"{loss:>6}", style)
             draw_loss_meter(put, row, table_x + 2 + len(prefix), monitor, segments,
                             purple, yellow, red, style & curses.A_REVERSE)
@@ -639,7 +683,7 @@ def dashboard(screen, hosts, interval, versions=()):
     theme = next(iter(THEMES))
     apply_theme(theme)
 
-    monitors = [Monitor(host) for host in hosts]
+    monitors = [Monitor(host, group=group) for host, group in hosts]
     selected = 0
     query = ""
     filter_edit = None
@@ -727,7 +771,7 @@ def dashboard(screen, hosts, interval, versions=()):
             page = draw_dashboard(background, height, width, [monitors[i] for i in indices],
                                   view_index, interval, view_message, hops, hop_index, route_focus,
                                   route_message, route_enabled, ping_enabled, graph_mode,
-                                  query, target_state, reverse, len(monitors), shaded_history)
+                                  query, target_state, reverse, len(monitors), shaded_history, versions)
             if menu:
                 draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background)
             try:
@@ -810,6 +854,10 @@ def dashboard(screen, hosts, interval, versions=()):
                 message = ""
             elif key == curses.KEY_DC:
                 query = ""
+            elif key == ord("v"):
+                options = tuple(FAMILIES)
+                versions = options[(options.index(versions) + 1) % len(options)]
+                message = f"Novos alvos: {FAMILIES[versions]}"
             elif key == ord("r"):
                 reverse = not reverse
                 route_focus = False
@@ -858,8 +906,8 @@ def dashboard(screen, hosts, interval, versions=()):
                     curses.curs_set(0)
                     screen.timeout(150)
                 try:
-                    existing = {monitor.host for monitor in monitors}
-                    additions = [item for item in load_targets(host, versions) if item not in existing]
+                    existing = {(monitor.host, monitor.group) for monitor in monitors}
+                    additions = [item for item in grouped_targets(host, versions) if item not in existing]
                     if not additions:
                         message = "Todos os alvos já estão na lista."
                     elif len(monitors) + len(additions) > MAX_TARGETS:
@@ -867,7 +915,7 @@ def dashboard(screen, hosts, interval, versions=()):
                     else:
                         route_focus = False
                         selected = len(monitors)
-                        monitors.extend(Monitor(item) for item in additions)
+                        monitors.extend(Monitor(item, group=group) for item, group in additions)
                         next_probe = 0
                         message = f"{len(additions)} alvo(s) adicionado(s)."
                 except ValueError as error:
@@ -889,7 +937,7 @@ def main():
     hosts = {}
     try:
         for value in args.hosts:
-            hosts.update(dict.fromkeys(load_targets(value, versions)))
+            hosts.update(dict.fromkeys(grouped_targets(value, versions)))
             if len(hosts) > MAX_TARGETS:
                 raise ValueError(f"informe até {MAX_TARGETS} alvos")
     except ValueError as error:
