@@ -167,7 +167,7 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
     # Four vertical dots per cell. Plot the same RTT above and below the center.
     middle = 2 * rows
     scale = (middle - 1) / (peak or 1)
-    start = graph_x + 1 + cols - len(history)
+    start = graph_x + 1 + (cols - len(history)) // 2
     previous = None
     for index, value in enumerate(history):
         age = min(3, (len(history) - 1 - index) * 4 // len(history))

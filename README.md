@@ -49,7 +49,7 @@ refletir limitação de respostas ICMP no roteador.
 O gráfico em Braille identifica o IP sondado e o horário local de início
 da última sondagem. Em terminais estreitos, `Tab` troca a lista visível.
 
-A curva avança da direita para a esquerda conforme chegam sondagens. As amostras antigas perdem intensidade.
+A curva fica centralizada horizontalmente enquanto preenche a área disponível. A amostra mais recente fica à direita da sequência e as antigas perdem intensidade.
 
 Projeto independente. Licença MIT.
 
