@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Monitor de latência ICMP para terminais Linux."""
+
+import argparse
+import curses
+import re
+import subprocess
+import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+
+TARGET = re.compile(r"[a-zA-Z0-9:][a-zA-Z0-9_.:%-]{0,252}")
+LATENCY = re.compile(r"time[=<]([\d.]+)\s*ms")
+MAX_TARGETS = 32
+
+
+def probe(host):
+    try:
+        result = subprocess.run(
+            ["ping", "-n", "-c", "1", "-W", "1", "--", host],
+            capture_output=True, text=True, timeout=3, env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        )
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT", None
+    except OSError:
+        return "ERRO", None
+    match = LATENCY.search(result.stdout)
+    if result.returncode == 0 and match:
+        return "OK", float(match[1])
+    return ("TIMEOUT" if result.returncode == 1 else "ERRO"), None
+
+
+@dataclass
+class Monitor:
+    host: str
+    status: str = "AGUARDE"
+    history: deque = field(default_factory=lambda: deque(maxlen=60))
+    sent: int = 0
+    lost: int = 0
+    pending: object = None
+
+    def update(self, pool):
+        if self.pending is not None:
+            if not self.pending.done():
+                return
+            self.status, latency = self.pending.result()
+            self.pending = None
+            self.history.append(latency)
+            if self.status != "ERRO":
+                self.sent += 1
+                self.lost += self.status == "TIMEOUT"
+        self.pending = pool.submit(probe, self.host)
+
+
+def dashboard(screen, hosts, interval):
+    curses.curs_set(0)
+    screen.keypad(True)
+    screen.timeout(150)
+    if curses.has_colors():
+        curses.start_color()
+        curses.use_default_colors()
+        for index, color in enumerate((curses.COLOR_CYAN, curses.COLOR_GREEN,
+                                       curses.COLOR_YELLOW, curses.COLOR_RED), 1):
+            curses.init_pair(index, color, -1)
+
+    monitors = [Monitor(host) for host in hosts]
+    selected = 0
+    next_probe = 0
+    message = ""
+    with ThreadPoolExecutor(max_workers=MAX_TARGETS) as pool:
+        while True:
+            now = time.monotonic()
+            if now >= next_probe:
+                for monitor in monitors:
+                    monitor.update(pool)
+                next_probe = now + interval
+
+            screen.erase()
+            height, width = screen.getmaxyx()
+
+            def put(y, x, value, style=0):
+                if 0 <= y < height and 0 <= x < width - 1:
+                    screen.addnstr(y, x, value, width - x - 1, style)
+
+            accent = curses.color_pair(1) | curses.A_BOLD
+            put(0, 0, "╭─ PINGTOOLs · Monitor ICMP " + "─" * width, accent)
+            put(1, 0, f"│ {len(monitors)} alvos  ·  {interval:g}s entre ciclos", accent)
+            if width < 54 or height < 9:
+                put(2, 0, "Amplie o terminal para pelo menos 54×9.")
+            else:
+                name_width = min(36, width - 33)
+                put(3, 2, f"{'ALVO':<{name_width}} {'ESTADO':<8} {'LATÊNCIA':>10} {'PERDA':>7}", accent)
+                visible = height - 8
+                start = max(0, selected - visible + 1)
+                for row, monitor in enumerate(monitors[start:start + visible], 4):
+                    color = {"OK": 2, "AGUARDE": 3}.get(monitor.status, 4)
+                    style = curses.color_pair(color)
+                    if row - 4 + start == selected:
+                        style |= curses.A_REVERSE
+                    last = monitor.history[-1] if monitor.history else None
+                    latency = f"{last:.1f} ms" if last is not None else "—"
+                    loss = f"{monitor.lost / monitor.sent:.0%}" if monitor.sent else "—"
+                    name = monitor.host[:name_width]
+                    put(row, 2, f"{name:<{name_width}} {monitor.status:<8} {latency:>10} {loss:>7}", style)
+                if monitors:
+                    history = list(monitors[selected].history)[-max(1, width - 25):]
+                    peak = max((n for n in history if n is not None), default=0)
+                    bars = "▁▂▃▄▅▆▇█"
+                    graph = "".join("×" if n is None else bars[min(7, int(8 * n / max(peak, 0.01)))]
+                                    for n in history)
+                    put(height - 4, 2, f"Pico {peak:.1f} ms  {graph}" if history else "Aguardando amostras…", accent)
+            put(height - 2, 2, message)
+            put(height - 1, 0, " ↑↓ Selecionar  a Adicionar  d Remover  q Sair", accent)
+            key = screen.getch()
+            if key in (ord("q"), 27):
+                return
+            if key == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif key == curses.KEY_DOWN and monitors:
+                selected = min(len(monitors) - 1, selected + 1)
+            elif key == ord("d") and monitors:
+                monitors.pop(selected)
+                selected = min(selected, max(0, len(monitors) - 1))
+                message = ""
+            elif key == ord("a") and height >= 3 and width >= 12:
+                screen.move(height - 2, 0)
+                screen.clrtoeol()
+                screen.addstr("Alvo: ")
+                curses.echo()
+                curses.curs_set(1)
+                screen.timeout(-1)
+                try:
+                    host = screen.getstr(height - 2, 6, min(253, width - 7)).decode(errors="replace").strip()
+                except curses.error:
+                    host = ""
+                finally:
+                    curses.noecho()
+                    curses.curs_set(0)
+                    screen.timeout(150)
+                if not TARGET.fullmatch(host):
+                    message = "Informe um IP ou nome de host válido."
+                elif any(monitor.host == host for monitor in monitors):
+                    message = "Esse alvo já está na lista."
+                elif len(monitors) >= MAX_TARGETS:
+                    message = f"Limite de {MAX_TARGETS} alvos."
+                else:
+                    monitors.append(Monitor(host))
+                    selected = len(monitors) - 1
+                    next_probe = 0
+                    message = ""
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("hosts", nargs="*", metavar="ALVO")
+    parser.add_argument("-i", "--interval", type=float, default=1,
+                        help="segundos entre ciclos (0,5 a 60)")
+    args = parser.parse_args()
+    if not 0.5 <= args.interval <= 60:
+        parser.error("o intervalo deve ficar entre 0,5 e 60 segundos")
+    hosts = list(dict.fromkeys(args.hosts))
+    if len(hosts) > MAX_TARGETS or any(not TARGET.fullmatch(host) for host in hosts):
+        parser.error(f"informe até {MAX_TARGETS} IPs ou nomes de host válidos")
+    try:
+        curses.wrapper(dashboard, hosts, args.interval)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
