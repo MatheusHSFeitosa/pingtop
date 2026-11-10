@@ -80,12 +80,14 @@ class Monitor:
             self.sent += 1
             self.lost += status == "TIMEOUT"
 
-    def update(self, pool):
+    def update(self, pool, enabled):
         if self.pending is not None:
             if not self.pending.done():
                 return
             self.record(*self.pending.result())
-        self.pending = pool.submit(probe, self.host)
+            self.pending = None
+        if enabled:
+            self.pending = pool.submit(probe, self.host)
 
 
 def panel(put, y, x, height, width, title, color):
@@ -228,7 +230,8 @@ def draw_menu(put, height, width, view, index, interval, theme):
     else:
         lines = ("a Adicionar  ·  d Remover  ·  t Tracert",
                  "Tab Alternar foco  ·  ↑↓ Selecionar",
-                 "PgUp/PgDn Navegar  ·  q Sair")
+                 "PgUp/PgDn Navegar  ·  q Sair",
+                 "p Pausar ou retomar ping")
     for row, line in enumerate(lines):
         active = view != "Ajuda" and row == index + (view == "Limpar lista")
         put(y + 4 + row, x + 2, line.ljust(menu_width - 4),
@@ -241,7 +244,7 @@ def draw_menu(put, height, width, view, index, interval, theme):
 
 
 def draw_dashboard(put, height, width, monitors, selected, interval, message,
-                   hops, hop_index, route_focus, route_message, route_enabled):
+                   hops, hop_index, route_focus, route_message, route_enabled, ping_enabled):
     cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
     bold = curses.A_BOLD
     if width < 48 or height < 16:
@@ -252,7 +255,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     width -= 1
     panel(put, 0, 0, 3, width, "PINGTOP / ICMP", cyan)
     border_label(put, 0, width - 12, "Esc menu", cyan)
-    put(1, 2, f"{len(monitors)} alvos  ·  {interval:g}s", bold)
+    put(1, 2, f"{len(monitors)} alvos  ·  {interval:g}s  ·  p Ping {'ativo' if ping_enabled else 'pausado'}", bold)
     wide = width >= 95 and height >= 20
     left = width // 2 if wide else width
     right = width - left if wide else width
@@ -360,6 +363,7 @@ def dashboard(screen, hosts, interval):
     monitors = [Monitor(host) for host in hosts]
     selected = 0
     next_probe = 0
+    ping_enabled = True
     message = ""
     menu = None
     menu_index = 0
@@ -374,7 +378,7 @@ def dashboard(screen, hosts, interval):
             now = time.monotonic()
             if now >= next_probe:
                 for monitor in monitors:
-                    monitor.update(pool)
+                    monitor.update(pool, ping_enabled)
                 next_probe = now + interval
 
             target = monitors[selected] if monitors and route_enabled else None
@@ -417,7 +421,7 @@ def dashboard(screen, hosts, interval):
                 put(y, x, value, curses.A_DIM if menu else style)
 
             page = draw_dashboard(background, height, width, monitors, selected, interval, message,
-                                  hops, hop_index, route_focus, route_message, route_enabled)
+                                  hops, hop_index, route_focus, route_message, route_enabled, ping_enabled)
             if menu:
                 draw_menu(put, height, width, menu, menu_index, interval, theme)
             try:
@@ -473,7 +477,14 @@ def dashboard(screen, hosts, interval):
                     if monitor.pending is not None:
                         monitor.pending.cancel()
                 return
-            if key == ord("t"):
+            if key == ord("p"):
+                ping_enabled = not ping_enabled
+                next_probe = 0
+                if not ping_enabled:
+                    for monitor in monitors:
+                        if monitor.pending is not None and monitor.pending.cancel():
+                            monitor.pending = None
+            elif key == ord("t"):
                 route_enabled = not route_enabled
                 route_focus = route_enabled
             elif key == 9:

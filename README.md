@@ -29,6 +29,7 @@ Você também pode digitar uma faixa ou CIDR pela tecla `a`. No CIDR, o programa
 | a | Adicionar alvo |
 | d | Remover alvo selecionado |
 | PgUp / PgDn | Navegar por página |
+| p | Pausar ou retomar o ping contínuo de todos os alvos |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
 | Esc / m | Abrir o menu principal |
