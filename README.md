@@ -31,8 +31,9 @@ Você também pode digitar uma faixa ou CIDR pela tecla `a`. No CIDR, o programa
 | PgUp / PgDn | Navegar por página |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
-| m / ? | Abrir ou fechar o menu |
-| q / Esc | Sair (Esc fecha primeiro o menu) |
+| m | Abrir ou fechar o menu principal |
+| ? | Abrir ou fechar a ajuda |
+| q / Esc | Sair (Esc volta um nível no menu) |
 
 A perda é acumulada desde a adição do alvo. O gráfico exibe até 60 amostras recentes, ajusta a escala ao maior valor exibido e marca amostras sem latência com `×`. O estado `ERRO` indica falha na execução ou na resolução do alvo e fica fora do cálculo de perda.
 
@@ -49,3 +50,6 @@ O gráfico em Braille identifica o IP sondado e o horário local de início
 da última sondagem. Em terminais estreitos, `Tab` troca a lista visível.
 
 Projeto independente. Licença MIT.
+
+No menu principal, use as setas e Enter para abrir Opções, Ajuda ou Sair.
+Em Opções, use ←/→ para trocar o tema ou ajustar o intervalo da sessão.

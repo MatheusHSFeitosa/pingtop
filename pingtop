@@ -88,7 +88,8 @@ class Monitor:
 
 def panel(put, y, x, height, width, title, color):
     put(y, x, "╭" + "─" * (width - 2) + "╮", color)
-    put(y, x + 2, f" {title[:width - 6]} ", color | curses.A_BOLD)
+    title = "¹²³⁴"[int(title[0]) - 1] + title[1:] if title[:2] in ("1 ", "2 ", "3 ", "4 ") else title
+    put(y, x + 2, f" {title[:width - 6]} ", curses.A_BOLD)
     for row in range(y + 1, y + height - 1):
         put(row, x, "│" + " " * (width - 2) + "│", color)
     put(y + height - 1, x, "╰" + "─" * (width - 2) + "╯", color)
@@ -121,6 +122,7 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
     # Unicode Braille gives two columns and four vertical positions per cell.
     cols = width - 4
     rows = height - 5
+    cols -= 8
     history = list(monitor.history)[-2 * cols:]
     samples = [value for value in history if value is not None]
     peak = max(samples, default=0)
@@ -131,30 +133,74 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
             ip = str(ipaddress.ip_address(monitor.host))
         except ValueError:
             ip = "—"
-    put(y + 1, 2, f"IP {ip}"[:cols], curses.A_BOLD)
-    put(y + 2, 2, f"Sonda {monitor.stamp}  Média {average}"[:cols], dim)
+    put(y + 1, 2, f"IP {ip}"[:width - 4], curses.A_BOLD)
+    put(y + 2, 2, f"Sonda {monitor.stamp}  Média {average}"[:width - 4], dim)
     scale = f"0 ─ Pico {peak:.2f} ms" if samples else "Sem RTT disponível"
-    put(y + height - 2, 2, f"{scale} · {len(history)} amostras"[:cols], dim)
+    put(y + height - 2, 2, f"{scale} · {len(history)} amostras"[:width - 4], dim)
     grid = [[0] * cols for _ in range(rows)]
     dots = ((1, 2, 4, 64), (8, 16, 32, 128))
+    previous = None
     gaps = set()
     for index, value in enumerate(history, 2 * cols - len(history)):
         col, side = divmod(index, 2)
         if value is None:
             gaps.add(col)
+            previous = None
             continue
         level = round(value / (peak or 1) * (4 * rows - 1))
-        row, offset = divmod(4 * rows - 1 - level, 4)
-        grid[row][col] |= dots[side][offset]
+        top = 4 * rows - 1 - level
+        lower = top if previous is None else previous
+        for position in range(min(top, lower), max(top, lower) + 1):
+            row, offset = divmod(position, 4)
+            grid[row][col] |= dots[side][offset]
+        previous = top
     for row, cells in enumerate(grid):
-        put(y + 3 + row, 2, "".join(chr(0x2800 + cell) if cell else " " for cell in cells), green)
+        color = curses.color_pair(6 + min(3, row * 4 // rows)) if getattr(curses, "COLORS", 0) >= 256 else green
+        put(y + 3 + row, 10, "".join(chr(0x2800 + cell) if cell else " " for cell in cells), color)
+    if samples:
+        put(y + 3, 2, f"{peak:.2f}"[:7], dim)
+        if rows > 1:
+            put(y + height - 3, 2, "0 ms", dim)
     for col in gaps:
         if not grid[-1][col]:
-            put(y + height - 3, 2 + col, "×", red)
+            put(y + height - 3, 10 + col, "×", red)
 
 
-def draw_dashboard(put, height, width, monitors, selected, interval, message, menu,
-                   hops, hop_index, route_focus, route_message):
+MENU_ITEMS = ("Opções", "Ajuda", "Sair")
+
+
+def draw_menu(put, height, width, view, index, interval, muted):
+    menu_width = min(56, width - 4)
+    y, x = (height - 11) // 2, (width - menu_width) // 2
+    accent = curses.color_pair(4)
+    panel(put, y, x, 11, menu_width, view, accent)
+    logo = (
+        "█▀█ █ █▄ █ █▀▀ ▀█▀ █▀█ █▀█",
+        "█▀▀ █ █ ▀█ █▄█  █  █▄█ █▀▀",
+    )
+    for row, line in enumerate(logo, y + 1):
+        put(row, x + (menu_width - len(line)) // 2, line, accent | curses.A_BOLD)
+    if view == "Menu":
+        lines = MENU_ITEMS
+    elif view == "Opções":
+        lines = (f"Intervalo  ‹ {interval:g} s ›",
+                 f"Tema       ‹ {'Discreto' if muted else 'Terminal'} ›")
+    else:
+        lines = ("a Adicionar  ·  d Remover  ·  t Tracert",
+                 "Tab Alternar foco  ·  ↑↓ Selecionar",
+                 "PgUp/PgDn Navegar  ·  q Sair")
+    for row, line in enumerate(lines):
+        active = view != "Ajuda" and row == index
+        put(y + 4 + row, x + 2, line.ljust(menu_width - 4),
+            curses.A_REVERSE | curses.A_BOLD if active else 0)
+    hint = {"Menu": "↑↓ Selecionar  ·  Enter Abrir",
+            "Opções": "↑↓ Selecionar  ·  ←→ Alterar",
+            "Ajuda": "Esc Voltar"}[view]
+    put(y + 9, x + 2, hint, curses.A_DIM)
+
+
+def draw_dashboard(put, height, width, monitors, selected, interval, message,
+                   hops, hop_index, route_focus, route_message, route_enabled):
     cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
     bold = curses.A_BOLD
     if width < 48 or height < 16:
@@ -198,6 +244,8 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message, me
     if wide or not route_focus:
         panel(put, table_y, table_x, table_height, right, "2 Alvos monitorados",
               cyan | (0 if route_focus else bold))
+        position = f" {selected + 1 if monitors else 0}/{len(monitors)} "
+        put(table_y + table_height - 1, table_x + right - len(position) - 2, position, cyan)
         name_width = right - 31
         put(table_y + 1, table_x + 2,
             f"{'ALVO':<{name_width}} {'ESTADO':<8} {'RTT':>9} {'PERDA':>6}", bold)
@@ -215,6 +263,8 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message, me
 
     if wide or route_focus:
         panel(put, route_y, table_x, route_height, right, "4 Tracert / ICMP", red)
+        route_action = " t parar " if route_enabled else " t iniciar "
+        put(route_y + route_height - 1, table_x + right - len(route_action) - 2, route_action, red)
         name_width = right - 29
         put(route_y + 1, table_x + 2,
             f"{'#':>2} {'SALTO':<{name_width}} {'RTT ms':>7} {'Média':>7} {'Perda':>5}", bold)
@@ -237,19 +287,6 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message, me
 
     put(height - 2, 2, message, yellow)
     put(height - 1, 1, "t Rota  Tab Foco  a Adic.  d Rem.  m Menu  q Sair", cyan | bold)
-    if menu:
-        menu_width = min(56, width - 4)
-        y, x = (height - 9) // 2, (width - menu_width) // 2
-        panel(put, y, x, 9, menu_width, "PINGTOP / Menu", red)
-        for row, line in enumerate((
-            "t      Iniciar ou parar Tracert",
-            "Tab    Alternar foco entre alvos e saltos",
-            "↑ ↓    Selecionar e atualizar gráfico",
-            "Pg↑ ↓  Navegar por página",
-            "a / d  Adicionar / remover alvo",
-            "q      Sair", "Esc    Fechar menu",
-        ), y + 1):
-            put(row, x + 2, line, bold if row == y + 1 else 0)
     return max(1, (route_height if route_focus else table_height) - 3)
 
 
@@ -260,16 +297,29 @@ def dashboard(screen, hosts, interval):
     if curses.has_colors():
         curses.start_color()
         curses.use_default_colors()
-        for index, color in enumerate((curses.COLOR_CYAN, curses.COLOR_GREEN,
-                                       curses.COLOR_YELLOW, curses.COLOR_RED,
-                                       curses.COLOR_MAGENTA), 1):
+
+    def apply_theme(discreet):
+        if not curses.has_colors():
+            return
+        colors = (curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_YELLOW,
+                  curses.COLOR_RED, curses.COLOR_MAGENTA)
+        if curses.COLORS >= 256 and discreet:
+            colors = (67, 114, 179, 167, 103)
+        for index, color in enumerate(colors, 1):
             curses.init_pair(index, color, -1)
+        if curses.COLORS >= 256:
+            for index, color in enumerate((229, 149, 114, 72), 6):
+                curses.init_pair(index, color if discreet else curses.COLOR_GREEN, -1)
+
+    apply_theme(True)
 
     monitors = [Monitor(host) for host in hosts]
     selected = 0
     next_probe = 0
     message = ""
-    menu = False
+    menu = None
+    menu_index = 0
+    muted = True
     route_enabled = route_focus = False
     route_target = route_pending = None
     route_message = ""
@@ -317,24 +367,46 @@ def dashboard(screen, hosts, interval):
                 if 0 <= y < height and 0 <= x < width - 1:
                     screen.addnstr(y, x, value, width - x - 1, style)
 
-            page = draw_dashboard(put, height, width, monitors, selected, interval, message, menu,
-                                  hops, hop_index, route_focus, route_message)
+            if width < 48 or height < 16:
+                menu = None
+
+            def background(y, x, value, style=0):
+                put(y, x, value, curses.A_DIM if menu else style)
+
+            page = draw_dashboard(background, height, width, monitors, selected, interval, message,
+                                  hops, hop_index, route_focus, route_message, route_enabled)
+            if menu:
+                draw_menu(put, height, width, menu, menu_index, interval, muted)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
                 key = ord("q")
-            if key in (ord("m"), ord("?")):
-                menu = not menu and width >= 48 and height >= 16
+            if key in (ord("m"), ord("?")) and width >= 48 and height >= 16:
+                menu = ("Ajuda" if key == ord("?") else "Menu") if not menu else None
+                menu_index = 0
                 continue
-            if menu and (width < 48 or height < 16):
-                menu = False
-            if menu:
+            if menu and key != ord("q"):
                 if key == 27:
-                    menu = False
+                    menu = None if menu == "Menu" else "Menu"
+                    menu_index = 0
+                elif key in (curses.KEY_UP, curses.KEY_DOWN) and menu != "Ajuda":
+                    size = len(MENU_ITEMS) if menu == "Menu" else 2
+                    menu_index = (menu_index + (1 if key == curses.KEY_DOWN else -1)) % size
+                elif key in (10, 13, curses.KEY_ENTER) and menu == "Menu":
+                    menu = MENU_ITEMS[menu_index]
+                    menu_index = 0
+                    if menu == "Sair":
+                        key = ord("q")
+                elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and menu == "Opções":
+                    if menu_index == 0:
+                        delta = 0.5 if key == curses.KEY_RIGHT else -0.5
+                        interval = max(0.5, min(60, interval + delta))
+                        next_probe = next_trace = 0
+                    else:
+                        muted = not muted
+                        apply_theme(muted)
+                if key != ord("q"):
                     continue
-                if key not in (ord("a"), ord("d"), ord("q")):
-                    continue
-                menu = False
             if key in (ord("q"), 27):
                 for monitor in monitors:
                     if monitor.pending is not None:
