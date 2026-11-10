@@ -174,7 +174,7 @@ def rtt_text(value):
     return f"{value:.2f}" if value is not None else "—"
 
 
-HISTORY_GREYS = (255, 254, 252, 251, 250, 249, 248, 246)
+HISTORY_GREYS = (255, 253, 251, 249, 247, 246, 245, 243)
 
 
 def draw_history(put, y, width, height, monitor, red, dim, shaded=False):
@@ -211,7 +211,7 @@ def draw_history(put, y, width, height, monitor, red, dim, shaded=False):
         age = row - y - start
         shade = age * (len(HISTORY_GREYS) - 1) // max(6, capacity - 1)
         style = curses.color_pair(15 + shade) if shaded else (
-            curses.A_DIM if shade >= 4 else 0)
+            curses.A_DIM if shade >= 3 else 0)
         if age == 0:
             style |= curses.A_BOLD
         put(row, 2, line[:width], style)
@@ -377,6 +377,27 @@ def visible_targets(monitors, query, state, reverse):
     return indices[::-1] if reverse else indices
 
 
+def loss_meter(lost, sent, segments):
+    if not sent or not lost:
+        return 0
+    if lost == sent:
+        return segments
+    return max(1, min(segments - 1, (lost * segments + sent // 2) // sent))
+
+
+def loss_segments(width):
+    return 8 if width >= 64 else (5 if width >= 51 else 0)
+
+
+def draw_loss_meter(put, row, x, monitor, segments, muted, warning, critical, selection):
+    filled = loss_meter(monitor.lost, monitor.sent, segments) if segments else 0
+    if filled:
+        color = critical if monitor.lost == monitor.sent else warning
+        put(row, x, "▪" * filled, color | selection)
+    if filled < segments:
+        put(row, x + filled, "▪" * (segments - filled), muted | curses.A_DIM | selection)
+
+
 def draw_dashboard(put, height, width, monitors, selected, interval, message,
                    hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode="Micro",
                    query="", target_state=0, reverse=False, total=None, shaded_history=False):
@@ -454,9 +475,11 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
                      bottom=True, hotkey=True, active=target_state != 0)
         position = f" {selected + 1 if monitors else 0}/{len(monitors)} "
         border_label(put, table_y + table_height - 1, table_x + table_width - len(position) - 3, position, cyan, bottom=True)
-        name_width = table_width - 31
+        segments = loss_segments(table_width)
+        meter_width = segments + bool(segments)
+        name_width = table_width - 31 - meter_width
         put(table_y + 1, table_x + 2,
-            f"{'ALVO':<{name_width}} {'ESTADO':<8} {'RTT':>9} {'PERDA':>6}", bold)
+            f"{'ALVO':<{name_width}} {'ESTADO':<8} {'RTT':>9} {'PERDA':>{6 + meter_width}}", bold)
         visible = table_height - 3
         start = max(0, selected - visible + 1)
         for index, monitor in enumerate(monitors[start:start + visible], start):
@@ -466,8 +489,11 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
             last = monitor.history[-1] if monitor.history else None
             latency = f"{last:.2f} ms" if last is not None else "—"
             loss = f"{monitor.lost / monitor.sent:.0%}" if monitor.sent else "—"
-            put(table_y + 2 + index - start, table_x + 2,
-                f"{monitor.host[:name_width]:<{name_width}} {monitor.status:<8} {latency:>9} {loss:>6}", style)
+            row = table_y + 2 + index - start
+            prefix = f"{monitor.host[:name_width]:<{name_width}} {monitor.status:<8} {latency:>9} "
+            put(row, table_x + 2, prefix + " " * meter_width + f"{loss:>6}", style)
+            draw_loss_meter(put, row, table_x + 2 + len(prefix), monitor, segments,
+                            purple, yellow, red, style & curses.A_REVERSE)
 
     if wide or route_focus:
         panel(put, route_y, route_x, route_height, route_width, "4 Tracert / ICMP", red)
@@ -476,13 +502,18 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         if hops:
             position = f" {hop_index + 1}/{len(hops)} "
             border_label(put, route_y + route_height - 1, route_x + 2, position, red, bottom=True)
-        name_width = route_width - 36
+        segments = loss_segments(route_width)
+        rtt_width = 7 if route_width >= 59 else 5
+        name_width = route_width - 15 - 3 * rtt_width - (segments + 1 if segments else 0)
+        rtt_headings = (f"RTT{n}" + (" ms" if rtt_width == 7 else "") for n in range(1, 4))
+        headings = " ".join(f"{label:>{rtt_width}}" for label in rtt_headings)
+        loss_width = 5 + segments + bool(segments)
         put(route_y + 1, route_x + 2,
-            f"{'Nº':>2} {'HOST / IP':<{name_width}} {'RTT1 ms':>7} {'RTT2 ms':>7} {'RTT3 ms':>7} {'Perda':>5}", bold)
+            f"{'Nº':>2} {'HOST / IP':<{name_width}} {headings} {'Perda':>{loss_width}}", bold)
         visible_hops = route_height - 3 - bool(hops and route_message)
         start = max(0, hop_index - visible_hops + 1)
         for index, (ttl, hop) in enumerate(hops[start:start + visible_hops], start):
-            times = [f"{value:.2f}" if value is not None else "*"
+            times = [f"{value:.{2 if rtt_width == 7 or value < 100 else 1}f}" if value is not None else "*"
                      for _, _, value in hop.route_probes]
             times.extend(["—"] * (3 - len(times)))
             style = green if any(value is not None for _, _, value in hop.route_probes) else yellow
@@ -492,9 +523,12 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
             if len(label) > name_width and hop.address:
                 label = hop.address + (" +" if "," in hop.route_names else "")
             loss = f"{hop.lost / hop.sent:.0%}" if hop.sent else "—"
-            rtts = " ".join(f"{value:>7}" for value in times)
-            put(route_y + 2 + index - start, route_x + 2,
-                f"{ttl:2} {label[:name_width]:<{name_width}} {rtts} {loss:>5}", style)
+            rtts = " ".join(f"{value:>{rtt_width}}" for value in times)
+            row = route_y + 2 + index - start
+            prefix = f"{ttl:2} {label[:name_width]:<{name_width}} {rtts} "
+            put(row, route_x + 2, prefix + " " * (loss_width - 5) + f"{loss:>5}", style)
+            draw_loss_meter(put, row, route_x + 2 + len(prefix), hop, segments,
+                            purple, yellow, red, style & curses.A_REVERSE)
         if not hops or route_message:
             put(route_y + route_height - 2, route_x + 2,
                 (route_message or "t Iniciar rota")[:route_width - 4], yellow)
@@ -543,7 +577,7 @@ def dashboard(screen, hosts, interval):
         shaded_history = theme_background and curses.COLORS >= 256 and curses.COLOR_PAIRS >= 23
         if shaded_history:
             for index, color in enumerate(HISTORY_GREYS, 15):
-                curses.init_pair(index, color, background)
+                curses.init_pair(index, max(color, background + 8), background)
         curses.init_pair(14, curses.COLOR_WHITE if theme_background else -1, background)
         screen.bkgdset(" ", curses.color_pair(14))
         if curses.COLORS >= 256 and palette:

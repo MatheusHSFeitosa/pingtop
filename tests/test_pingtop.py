@@ -220,6 +220,11 @@ class GraphTest(unittest.TestCase):
 
 
 class TargetViewTest(unittest.TestCase):
+    def test_loss_meter_distinguishes_none_partial_and_total(self):
+        meter = APP["loss_meter"]
+        self.assertEqual([meter(lost, 100, 8) for lost in (0, 1, 50, 99, 100)], [0, 1, 4, 7, 8])
+        self.assertEqual(meter(0, 0, 8), 0)
+
     def test_status_query_and_reverse_are_combined(self):
         monitors = [APP["Monitor"](name) for name in ("Router", "router-backup", "other", "router-pending")]
         for monitor, status, address in zip(

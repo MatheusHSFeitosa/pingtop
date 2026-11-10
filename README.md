@@ -43,7 +43,8 @@ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e 
 ## Monitoramento
 
 O ping começa automaticamente. A coluna de perda acumula as sondagens desde
-a adição do alvo. O estado `ERRO` indica falha na execução ou na resolução do
+a adição do alvo. Quando há espaço, a porcentagem vem acompanhada de um
+medidor de quadrados em Alvos monitorados e no Tracert. O estado `ERRO` indica falha na execução ou na resolução do
 alvo e fica fora do cálculo de perda.
 
 - O histórico mostra as respostas mais recentes primeiro e usa colunas de
