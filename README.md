@@ -1,4 +1,4 @@
-# PINGTOOLs
+# PINGTOP
 
 Monitor de ping para Linux com interface de terminal inspirada no btop. Acompanhe até 1.024 alvos, com até 32 pings simultâneos, com latência da última resposta, percentual de perda e histórico visual por alvo.
 
@@ -7,16 +7,16 @@ Monitor de ping para Linux com interface de terminal inspirada no btop. Acompanh
 Requer Python 3.10+, um terminal com suporte a UTF-8 e o comando `ping` do iputils (pacote `iputils-ping` no Debian/Ubuntu).
 
 ```sh
-git clone https://github.com/MatheusHSFeitosa/pingtools.git
-cd pingtools
-./pingtools 127.0.0.1 1.1.1.1 example.com
+git clone https://github.com/MatheusHSFeitosa/pingtop.git
+cd pingtop
+./pingtop 127.0.0.1 1.1.1.1 example.com
 ```
 
 Aceita IPv4, IPv6, nomes de host, faixas IPv4 inclusivas e blocos CIDR IPv4.
 
 ```sh
-./pingtools 192.168.1.0/24
-./pingtools 192.168.1.1-192.168.1.254
+./pingtop 192.168.1.0/24
+./pingtop 192.168.1.1-192.168.1.254
 ```
 
 Você também pode digitar uma faixa ou CIDR pela tecla `a`. No CIDR, o programa usa os endereços de host do bloco, incluindo os dois IPs de um /31 e o IP único de um /32. Alvos repetidos são ignorados. Em listas grandes, as sondagens excedentes aguardam na fila.
