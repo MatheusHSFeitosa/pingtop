@@ -46,7 +46,7 @@ Use `Tab` para alternar o foco e as setas para selecionar um salto. A tabela
 mostra o número do salto, o nome ou IP e três RTTs por ciclo, em milissegundos. `*` indica uma tentativa sem resposta. Cada salto tem seu próprio gráfico. A perda intermediária pode
 refletir limitação de respostas ICMP no roteador.
 
-O gráfico em Braille identifica o IP sondado e o horário local de início
+O gráfico de quadradinhos identifica o IP sondado e o horário local de início
 da última sondagem. Em terminais estreitos, `Tab` troca a lista visível.
 
 A curva fica centralizada horizontalmente enquanto preenche a área disponível. A amostra mais recente fica à direita da sequência e as antigas perdem intensidade.

@@ -96,18 +96,18 @@ class Monitor:
 
 
 def panel(put, y, x, height, width, title, color):
-    put(y, x, "┏" + "━" * (width - 2) + "┓", color)
+    put(y, x, "┌" + "─" * (width - 2) + "┐", color)
     title = "¹²³⁴"[int(title[0]) - 1] + title[1:] if title[:2] in ("1 ", "2 ", "3 ", "4 ") else title
     border_label(put, y, x + 2, title[:width - 6], color)
     for row in range(y + 1, y + height - 1):
-        put(row, x, "┃" + " " * (width - 2) + "┃", color)
-    put(y + height - 1, x, "┗" + "━" * (width - 2) + "┛", color)
+        put(row, x, "│" + " " * (width - 2) + "│", color)
+    put(y + height - 1, x, "└" + "─" * (width - 2) + "┘", color)
 
 
 def border_label(put, y, x, title, color):
-    put(y, x, "┓", color)
+    put(y, x, "┐", color)
     put(y, x + 1, title, curses.A_BOLD)
-    put(y, x + len(title) + 1, "┏", color)
+    put(y, x + len(title) + 1, "┌", color)
 
 
 def trace(host):
@@ -165,7 +165,7 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
             ip = "—"
 
     for row in range(y + 1, y + height - 1):
-        put(row, graph_x - 1, "┃", dim)
+        put(row, graph_x - 1, "│", dim)
     border_label(put, y + 1, graph_x + 1, "Gráfico", dim)
     put(y + 1, 2, f"IP {ip}"[:info_width - 4], curses.A_BOLD)
     put(y + 2, 2, f"Sonda {monitor.stamp}"[:info_width - 4], dim)
@@ -199,13 +199,12 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
         put(y + 3 + row, 2, line[:info_width - 4],
             dim if latency is not None else red)
 
-    # Four vertical dots per cell. Plot the same RTT above and below the center.
-    middle = 2 * rows
+    # Mirror square pixels around the center of the available rows.
+    half = rows // 2
     # Plot variation around the lowest RTT with room above and below the trace.
     span = max(peak - minimum, 1.0)
-    scale = (middle - 1) / span
+    scale = (half - 1) / span
     start = graph_x + 1 + (cols - len(history)) // 2
-    previous = None
     for index, value in enumerate(history):
         age = min(3, (len(history) - 1 - index) * 4 // len(history))
         style = green
@@ -218,20 +217,12 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
 
         if value is None:
             put(y + 2 + rows // 2, start + index, "×", red | (style & curses.A_DIM))
-            previous = None
             continue
 
-        amplitude = round((middle - 1) * 0.2 + (value - minimum) * scale * 0.6)
-        near = min(amplitude, previous) if previous is not None else amplitude
-        far = max(amplitude, previous) if previous is not None else amplitude
-        cells = {}
-        for distance in range(near, far + 1):
-            for position in (middle - 1 - distance, middle + distance):
-                row, dot = divmod(position, 4)
-                cells[row] = cells.get(row, 0) | (9, 18, 36, 192)[dot]
-        for row, mask in cells.items():
-            put(y + 2 + row, start + index, chr(0x2800 + mask), style)
-        previous = amplitude
+        amplitude = round((half - 1) * 0.2 + (value - minimum) * scale * 0.6)
+        for distance in range(amplitude + 1):
+            put(y + 1 + half - distance, start + index, "▪", style)
+            put(y + 2 + rows - half + distance, start + index, "▪", style)
 
 
 MENU_ITEMS = ("Opções", "Ajuda", "Limpar lista", "Sair")
