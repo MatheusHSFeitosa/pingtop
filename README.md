@@ -27,7 +27,9 @@ Você também pode digitar a mesma faixa pela tecla `a`. Informe os dois IPs com
 | ↑ / ↓ | Selecionar alvo e ver seu histórico |
 | a | Adicionar alvo |
 | d | Remover alvo selecionado |
-| q / Esc | Sair |
+| PgUp / PgDn | Navegar por página |
+| m / ? | Abrir ou fechar o menu |
+| q / Esc | Sair (Esc fecha primeiro o menu) |
 
 A perda é acumulada desde a adição do alvo. O gráfico exibe até 60 amostras recentes, ajusta a escala ao maior valor exibido e marca amostras sem latência com `×`. O estado `ERRO` indica falha na execução ou na resolução do alvo e fica fora do cálculo de perda.
 

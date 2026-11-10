@@ -67,6 +67,99 @@ class Monitor:
         self.pending = pool.submit(probe, self.host)
 
 
+def panel(put, y, x, height, width, title, color):
+    put(y, x, "╭" + "─" * (width - 2) + "╮", color)
+    put(y, x + 2, f" {title[:width - 6]} ", color | curses.A_BOLD)
+    for row in range(y + 1, y + height - 1):
+        put(row, x, "│" + " " * (width - 2) + "│", color)
+    put(y + height - 1, x, "╰" + "─" * (width - 2) + "╯", color)
+
+
+def draw_dashboard(put, height, width, monitors, selected, interval, message, menu):
+    cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
+    bold = curses.A_BOLD
+    if width < 48 or height < 16:
+        put(0, 0, "PINGTOOLs", cyan | bold)
+        put(1, 0, "Amplie o terminal para pelo menos 48×16.")
+        put(height - 1, 0, "a Adicionar   q Sair")
+        return 1
+
+    width -= 1
+    panel(put, 0, 0, 3, width, "PINGTOOLs / ICMP", cyan)
+    counts = [sum(item.status == state for item in monitors)
+              for state in ("OK", "TIMEOUT", "ERRO")]
+    put(1, 2, f"{len(monitors)} alvos  ·  {interval:g}s", bold)
+    summary = f"{counts[0]} OK / {counts[1]} sem resposta / {counts[2]} erros"
+    if width >= 60:
+        put(1, width - len(summary) - 2, summary, green)
+
+    wide = width >= 91
+    chart_width = width // 2 if wide else width
+    chart_height = height - 6 if wide else min(9, height - 10)
+    table_x = chart_width if wide else 0
+    table_y = 3 if wide else 3 + chart_height
+    table_width = width - table_x
+    table_height = height - table_y - 3
+    panel(put, 3, 0, chart_height, chart_width, "1 Histórico de latência", purple)
+    panel(put, table_y, table_x, table_height, table_width, "2 Alvos monitorados", cyan)
+
+    visible = table_height - 3
+    name_width = table_width - 31
+    put(table_y + 1, table_x + 2,
+        f"{'ALVO':<{name_width}} {'ESTADO':<8} {'RTT':>9} {'PERDA':>6}", bold)
+    start = max(0, selected - visible + 1)
+    for index, monitor in enumerate(monitors[start:start + visible], start):
+        style = {"OK": green, "AGUARDE": yellow}.get(monitor.status, red)
+        if index == selected:
+            style |= curses.A_REVERSE
+        last = monitor.history[-1] if monitor.history else None
+        latency = f"{last:.2f} ms" if last is not None else "—"
+        loss = f"{monitor.lost / monitor.sent:.0%}" if monitor.sent else "—"
+        put(table_y + 2 + index - start, table_x + 2,
+            f"{monitor.host[:name_width]:<{name_width}} {monitor.status:<8} {latency:>9} {loss:>6}", style)
+
+    if monitors:
+        monitor = monitors[selected]
+        history = list(monitor.history)[-(chart_width - 4):]
+        put(4, 2, monitor.host[:chart_width - 4], bold)
+        if history:
+            samples = [sample for sample in history if sample is not None]
+            stats = "Sem respostas no histórico"
+            if samples:
+                stats = f"Média {sum(samples) / len(samples):.2f} ms  ·  Pico {max(samples):.2f} ms"
+            put(5, 2, stats[:chart_width - 4], purple)
+            rows = chart_height - 4
+            peak = max(samples, default=0) or 1
+            bars = " ▁▂▃▄▅▆▇█"
+            for col, sample in enumerate(history, chart_width - 2 - len(history)):
+                if sample is None:
+                    put(chart_height + 1, col, "×", red)
+                    continue
+                levels = max(1, round(sample / peak * rows * 8))
+                for row in range(min(rows, (levels + 7) // 8)):
+                    put(chart_height + 1 - row, col, bars[min(8, levels - row * 8)], green)
+        else:
+            put(5, 2, "Aguardando amostras…", yellow)
+    else:
+        put(4, 2, "Pressione a para adicionar um alvo.", yellow)
+
+    position = f" {selected + 1 if monitors else 0}/{len(monitors)} "
+    put(height - 4, width - len(position) - 2, position, cyan)
+    put(height - 2, 2, message, yellow)
+    put(height - 1, 1, "↑↓ Navegar  a Adicionar  d Remover  m Menu  q Sair", cyan | bold)
+    if menu:
+        menu_width = min(56, width - 4)
+        y, x = (height - 9) // 2, (width - menu_width) // 2
+        panel(put, y, x, 9, menu_width, "PINGTOOLs / Menu", red)
+        for row, line in enumerate((
+            "ATALHOS", "a      Adicionar IP, host ou faixa IPv4",
+            "d      Remover alvo selecionado", "↑ ↓    Navegar pela lista",
+            "Pg↑ ↓  Navegar por página", "q      Sair", "Esc    Fechar menu",
+        ), y + 1):
+            put(row, x + 2, line, bold if row == y + 1 else 0)
+    return visible
+
+
 def dashboard(screen, hosts, interval):
     curses.curs_set(0)
     screen.keypad(True)
@@ -75,13 +168,15 @@ def dashboard(screen, hosts, interval):
         curses.start_color()
         curses.use_default_colors()
         for index, color in enumerate((curses.COLOR_CYAN, curses.COLOR_GREEN,
-                                       curses.COLOR_YELLOW, curses.COLOR_RED), 1):
+                                       curses.COLOR_YELLOW, curses.COLOR_RED,
+                                       curses.COLOR_MAGENTA), 1):
             curses.init_pair(index, color, -1)
 
     monitors = [Monitor(host) for host in hosts]
     selected = 0
     next_probe = 0
     message = ""
+    menu = False
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         while True:
             now = time.monotonic()
@@ -97,39 +192,23 @@ def dashboard(screen, hosts, interval):
                 if 0 <= y < height and 0 <= x < width - 1:
                     screen.addnstr(y, x, value, width - x - 1, style)
 
-            accent = curses.color_pair(1) | curses.A_BOLD
-            put(0, 0, "╭─ PINGTOOLs · Monitor ICMP " + "─" * width, accent)
-            put(1, 0, f"│ {len(monitors)} alvos  ·  {interval:g}s entre ciclos", accent)
-            if width < 54 or height < 9:
-                put(2, 0, "Amplie o terminal para pelo menos 54×9.")
-            else:
-                name_width = min(36, width - 33)
-                put(3, 2, f"{'ALVO':<{name_width}} {'ESTADO':<8} {'LATÊNCIA':>10} {'PERDA':>7}", accent)
-                visible = height - 8
-                start = max(0, selected - visible + 1)
-                for row, monitor in enumerate(monitors[start:start + visible], 4):
-                    color = {"OK": 2, "AGUARDE": 3}.get(monitor.status, 4)
-                    style = curses.color_pair(color)
-                    if row - 4 + start == selected:
-                        style |= curses.A_REVERSE
-                    last = monitor.history[-1] if monitor.history else None
-                    latency = f"{last:.1f} ms" if last is not None else "—"
-                    loss = f"{monitor.lost / monitor.sent:.0%}" if monitor.sent else "—"
-                    name = monitor.host[:name_width]
-                    put(row, 2, f"{name:<{name_width}} {monitor.status:<8} {latency:>10} {loss:>7}", style)
-                if monitors:
-                    history = list(monitors[selected].history)[-max(1, width - 25):]
-                    peak = max((n for n in history if n is not None), default=0)
-                    bars = "▁▂▃▄▅▆▇█"
-                    graph = "".join("×" if n is None else bars[min(7, int(8 * n / max(peak, 0.01)))]
-                                    for n in history)
-                    put(height - 4, 2, f"Pico {peak:.1f} ms  {graph}" if history else "Aguardando amostras…", accent)
-            put(height - 2, 2, message)
-            put(height - 1, 0, " ↑↓ Selecionar  a Adicionar  d Remover  q Sair", accent)
+            page = draw_dashboard(put, height, width, monitors, selected, interval, message, menu)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
                 key = ord("q")
+            if key in (ord("m"), ord("?")):
+                menu = not menu and width >= 48 and height >= 16
+                continue
+            if menu and (width < 48 or height < 16):
+                menu = False
+            if menu:
+                if key == 27:
+                    menu = False
+                    continue
+                if key not in (ord("a"), ord("d"), ord("q")):
+                    continue
+                menu = False
             if key in (ord("q"), 27):
                 for monitor in monitors:
                     if monitor.pending is not None:
@@ -139,6 +218,10 @@ def dashboard(screen, hosts, interval):
                 selected = max(0, selected - 1)
             elif key == curses.KEY_DOWN and monitors:
                 selected = min(len(monitors) - 1, selected + 1)
+            elif key == curses.KEY_PPAGE:
+                selected = max(0, selected - page)
+            elif key == curses.KEY_NPAGE and monitors:
+                selected = min(len(monitors) - 1, selected + page)
             elif key == ord("d") and monitors:
                 removed = monitors.pop(selected)
                 if removed.pending is not None:
