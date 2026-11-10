@@ -155,6 +155,7 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
     history = list(monitor.history)[-cols:]
     samples = [value for value in history if value is not None]
     peak = max(samples, default=0)
+    minimum = min(samples, default=0)
     average = sum(samples) / len(samples) if samples else 0
     ip = monitor.address
     if ip is None:
@@ -173,13 +174,14 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
     if samples and len(stats) > info_width - 4 and height >= 7:
         put(y + height - 3, 2, f"Mín {min(samples):.2f} · Méd {average:.2f}"[:info_width - 4], dim)
         put(y + height - 2, 2, f"Máx {peak:.2f} ms", dim)
-        log_rows = min(4, height - 6)
+        log_rows = height - 6
     else:
         if samples and len(stats) > info_width - 4:
             stats = f"↓{min(samples):.2g} ~{average:.2g} ↑{peak:.2g} ms"
         put(y + height - 2, 2, stats[:info_width - 4], dim)
-        log_rows = min(4, height - 5)
-    for row, (stamp, latency, status, sequence, details) in enumerate(list(reversed(monitor.log))[:log_rows]):
+        log_rows = height - 5
+    entries = list(reversed(monitor.log))[:log_rows]
+    for row, (stamp, latency, status, sequence, details) in enumerate(entries):
         value = f"tempo={latency:.2f} ms" if latency is not None else (
             "sem resposta" if status == "TIMEOUT" else "erro de sondagem")
         if not monitor.route_probes:
@@ -188,8 +190,10 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
                 value = f"{size} bytes de {ip}: icmp_seq={sequence} ttl={ttl} {value}"
             else:
                 value = f"icmp_seq={sequence} {value}"
-        compact = f"#{sequence} T{details[1]} {latency:.2f}ms" if details else value
+        compact = f"#{sequence} ttl={details[1]} {latency:.2f} ms" if details else value
         line = f"{stamp} {value}"
+        if len(line) > info_width - 4:
+            line = f"{stamp} {compact}"
         if len(line) > info_width - 4:
             line = compact
         put(y + 3 + row, 2, line[:info_width - 4],
@@ -197,7 +201,9 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
 
     # Four vertical dots per cell. Plot the same RTT above and below the center.
     middle = 2 * rows
-    scale = (middle - 1) / (peak or 1)
+    # Plot variation around the lowest RTT with room above and below the trace.
+    span = max(peak - minimum, 1.0)
+    scale = (middle - 1) / span
     start = graph_x + 1 + (cols - len(history)) // 2
     previous = None
     for index, value in enumerate(history):
@@ -215,7 +221,7 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
             previous = None
             continue
 
-        amplitude = round(value * scale)
+        amplitude = round((middle - 1) * 0.2 + (value - minimum) * scale * 0.6)
         near = min(amplitude, previous) if previous is not None else amplitude
         far = max(amplitude, previous) if previous is not None else amplitude
         cells = {}
