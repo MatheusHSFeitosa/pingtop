@@ -97,12 +97,17 @@ def grouped_targets(value, versions=()):
     return [(address, group) for address in addresses]
 
 
-def dns_lookup(host):
+def dns_lookup(host, server=""):
     if not TARGET.fullmatch(host):
         return ["Informe um hostname ou endereço IP válido."]
+    if server and not TARGET.fullmatch(server):
+        return ["Informe um servidor DNS válido."]
+    command = ["nslookup", "-timeout=2", "-retry=1", host]
+    if server:
+        command.append(server)
     try:
         result = subprocess.run(
-            ["nslookup", "-timeout=2", "-retry=1", host],
+            command,
             capture_output=True, text=True, errors="replace", timeout=7,
         )
     except FileNotFoundError:
@@ -445,20 +450,25 @@ def draw_menu(put, height, width, view, index, interval, theme, graph_mode, them
     put(y + 9, x + 2, hint, curses.A_DIM)
 
 
-def draw_lookup(put, height, width, query, output, offset, busy):
+def draw_lookup(put, height, width, query, server, field, output, offset, busy):
     if width < 24 or height < 9:
         return 1
     box_width, box_height = min(90, width - 4), min(24, height - 2)
     y, x = (height - box_height) // 2, (width - box_width) // 2
     accent = curses.color_pair(1)
     panel(put, y, x, box_height, box_width, "NSLOOKUP / DNS", accent)
-    put(y + 1, x + 2, "Host ou IP: " + query[-(box_width - 17):] + "▏", curses.A_BOLD)
+    for index, (label, value) in enumerate((("Host ou IP", query), ("Servidor DNS", server))):
+        active = field == index
+        displayed = value or ("Padrão do sistema" if index and not active else "")
+        room = box_width - len(label) - 7
+        put(y + 1 + index, x + 2, f"{label}: {displayed[-room:]}" + ("▏" if active else ""),
+            curses.A_BOLD if active else 0)
     lines = ["Consultando DNS…"] if busy else output or ["Digite um domínio ou IP e pressione Enter."]
-    visible = box_height - 4
+    visible = box_height - 5
     offset = min(offset, max(0, len(lines) - visible))
-    for row, line in enumerate(lines[offset:offset + visible], y + 2):
+    for row, line in enumerate(lines[offset:offset + visible], y + 3):
         put(row, x + 2, line[:box_width - 4])
-    put(y + box_height - 2, x + 2, "Enter Consultar   ↑↓ Rolar   Esc Fechar"[:box_width - 4], accent)
+    put(y + box_height - 2, x + 2, "Tab Campo  Enter Consultar  ↑↓ Rolar  Esc Fechar"[:box_width - 4], accent)
     return visible
 
 
@@ -750,6 +760,8 @@ def dashboard(screen, hosts, interval, versions=()):
     query = ""
     filter_edit = None
     lookup_query = lookup_pending = None
+    lookup_server = ""
+    lookup_field = 0
     lookup_output = []
     lookup_offset = 0
     target_state = 0
@@ -848,8 +860,8 @@ def dashboard(screen, hosts, interval, versions=()):
                 draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background, hits)
             if lookup_query is not None:
                 hits.clear()
-                lookup_page = draw_lookup(put, height, width, lookup_query, lookup_output,
-                                          lookup_offset, lookup_pending is not None)
+                lookup_page = draw_lookup(put, height, width, lookup_query, lookup_server, lookup_field,
+                                          lookup_output, lookup_offset, lookup_pending is not None)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
@@ -860,17 +872,25 @@ def dashboard(screen, hosts, interval, versions=()):
                     lookup_query = None
                 elif key in (10, 13, curses.KEY_ENTER) and lookup_pending is None:
                     lookup_offset = 0
-                    lookup_pending = dns.submit(dns_lookup, lookup_query.strip())
+                    lookup_pending = dns.submit(dns_lookup, lookup_query.strip(), lookup_server.strip())
                 elif key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
                     delta = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
                              curses.KEY_PPAGE: -lookup_page, curses.KEY_NPAGE: lookup_page}[key]
                     lookup_offset = max(0, min(len(lookup_output) - lookup_page, lookup_offset + delta))
-                elif key in (8, 127, curses.KEY_BACKSPACE):
-                    lookup_query = lookup_query[:-1]
-                elif key == curses.KEY_DC:
-                    lookup_query = ""
-                elif 32 <= key <= 126 and len(lookup_query) < 253:
-                    lookup_query += chr(key)
+                elif key in (9, curses.KEY_BTAB):
+                    lookup_field = 1 - lookup_field
+                elif key in (8, 127, curses.KEY_BACKSPACE, curses.KEY_DC) or 32 <= key <= 126:
+                    text = lookup_server if lookup_field else lookup_query
+                    if key in (8, 127, curses.KEY_BACKSPACE):
+                        text = text[:-1]
+                    elif key == curses.KEY_DC:
+                        text = ""
+                    elif len(text) < 253:
+                        text += chr(key)
+                    if lookup_field:
+                        lookup_server = text
+                    else:
+                        lookup_query = text
                 elif key == curses.KEY_MOUSE:
                     try:
                         curses.getmouse()
@@ -989,6 +1009,7 @@ def dashboard(screen, hosts, interval, versions=()):
                     message = "A consulta DNS anterior ainda está em andamento."
                     continue
                 lookup_query = ""
+                lookup_field = 0
                 if indices:
                     monitor = monitors[selected]
                     lookup_query = monitor.group or monitor.host

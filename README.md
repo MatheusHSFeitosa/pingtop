@@ -95,7 +95,9 @@ expirou.
 ## NSLOOKUP
 
 Pressione `n` ou clique em **n DNS** para abrir a consulta. O alvo selecionado
-preenche o campo, e Delete limpa o texto. Enter consulta o DNS, as setas
+preenche o campo. Use Tab para alternar para **Servidor DNS** e digite um IP
+ou hostname, ou deixe vazio para usar o DNS do sistema. Delete limpa o campo
+ativo. O servidor escolhido fica disponível até sair do PINGTOP. Enter consulta o DNS, as setas
 rolam o resultado e Esc fecha o painel. Domínios retornam registros de
 endereço disponíveis, e IPs fazem consulta reversa. Requer o comando
 `nslookup` (pacote `dnsutils` no Debian/Ubuntu).
