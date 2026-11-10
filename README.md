@@ -60,6 +60,13 @@ A lista agrupa os IPs sob o hostname da URL. URLs com o mesmo hostname
 compartilham um grupo, pois o caminho e a porta não fazem parte do ping.
 IPs informados diretamente ficam separados.
 
+## Mouse
+
+Em terminais com suporte a eventos de mouse, clique em um alvo ou salto para
+selecioná-lo e use a roda sobre a lista para navegar. Os atalhos nas molduras
+e no rodapé também aceitam clique. No menu, clique em uma opção para abrir
+ou alterar seu valor.
+
 ## Monitoramento
 
 O ping começa automaticamente. A coluna de perda acumula as sondagens desde

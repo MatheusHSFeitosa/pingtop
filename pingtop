@@ -386,7 +386,7 @@ THEMES = {
 }
 
 
-def draw_menu(put, height, width, view, index, interval, theme, graph_mode, theme_background):
+def draw_menu(put, height, width, view, index, interval, theme, graph_mode, theme_background, hits=None):
     menu_width = min(56, width - 4)
     y, x = (height - 11) // 2, (width - menu_width) // 2
     accent = curses.color_pair(4)
@@ -416,6 +416,9 @@ def draw_menu(put, height, width, view, index, interval, theme, graph_mode, them
         active = view != "Ajuda" and row == index + (view == "Limpar lista")
         put(y + 4 + row, x + 2, line.ljust(menu_width - 4),
             curses.A_REVERSE | curses.A_BOLD if active else 0)
+        if hits is not None and view != "Ajuda" and (view != "Limpar lista" or row > 0):
+            hits.append((y + 4 + row, x + 2, 1, menu_width - 4,
+                         "menu", row - (view == "Limpar lista")))
     hint = {"Menu": "↑↓ Selecionar  ·  Enter Abrir",
             "Opções": "↑↓ Selecionar  ·  ←→ Alterar",
             "Ajuda": "Esc Voltar",
@@ -480,7 +483,7 @@ def draw_loss_meter(put, row, x, monitor, segments, muted, warning, critical, se
 
 def draw_dashboard(put, height, width, monitors, selected, interval, message,
                    hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode="Micro",
-                   query="", target_state=0, reverse=False, total=None, shaded_history=False, versions=()):
+                   query="", target_state=0, reverse=False, total=None, shaded_history=False, versions=(), hits=None):
     cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
     bold = curses.A_BOLD
     if width < 48 or height < 16:
@@ -488,15 +491,22 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         put(1, 0, "Amplie o terminal para pelo menos 48×16.")
         return 1
 
+    def hit(y, x, width, kind, value=0, height=1):
+        if hits is not None:
+            hits.append((y, x, height, width, kind, value))
+
     width -= 1
     panel(put, 0, 0, 3, width, "PINGTOP / ICMP", cyan)
     border_label(put, 0, width - 12, "Esc menu", cyan)
+    hit(0, width - 12, 10, "key", ord("m"))
     put(1, 2, f"{len(monitors) if total is None else total} alvos  ·  ping {'ativo' if ping_enabled else 'pausado'}", bold)
     if width >= 65:
         border_label(put, 0, width - 26, "ping", cyan, hotkey=True, active=not ping_enabled)
+        hit(0, width - 26, 6, "key", ord("p"))
     if width >= 72:
         family = f"v: {FAMILIES[versions]}"
         border_label(put, 0, 25, family, cyan, hotkey=True, active=bool(versions))
+        hit(0, 25, len(family) + 2, "key", ord("v"))
     timing = f"{time.strftime('%H:%M:%S')}  ·  {interval:g} s"
     put(1, width - len(timing) - 2, timing, cyan)
     wide = width >= 95 and height >= 20
@@ -549,13 +559,17 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         put(chart_y + 1, 2, "Nenhum alvo neste filtro." if total else "Pressione a para adicionar um alvo.", yellow)
 
     if wide or not route_focus:
+        hit(table_y, table_x, table_width, "targets", height=table_height)
         panel(put, table_y, table_x, table_height, table_width, "2 Alvos monitorados",
               cyan | (0 if route_focus else bold))
         border_label(put, table_y, table_x + 23, "filtro", cyan, hotkey=True, active=bool(query))
         border_label(put, table_y, table_x + 32, "reverter", cyan, hotkey=True, active=reverse)
+        hit(table_y, table_x + 23, 8, "key", ord("f"))
+        hit(table_y, table_x + 32, 10, "key", ord("r"))
         border_label(put, table_y + table_height - 1, table_x + 2,
                      f"status: {TARGET_STATES[target_state]}", cyan,
                      bottom=True, hotkey=True, active=target_state != 0)
+        hit(table_y + table_height - 1, table_x + 2, 10 + len(TARGET_STATES[target_state]), "key", ord("s"))
         position = f" {selected + 1 if monitors else 0}/{len(monitors)} "
         border_label(put, table_y + table_height - 1, table_x + table_width - len(position) - 3, position, cyan, bottom=True)
         segments = loss_segments(table_width)
@@ -572,6 +586,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
                 put(row, table_x + 2, label[:name_width], cyan | bold)
                 continue
             monitor = monitors[index]
+            hit(row, table_x + 1, table_width - 2, "target", index)
             style = {"OK": green, "AGUARDE": yellow}.get(monitor.status, red)
             if index == selected:
                 style |= curses.A_REVERSE
@@ -584,9 +599,12 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
                             purple, yellow, red, style & curses.A_REVERSE)
 
     if wide or route_focus:
+        hit(route_y, route_x, route_width, "hops", height=route_height)
         panel(put, route_y, route_x, route_height, route_width, "4 Tracert / ICMP", red)
         route_action = " t parar " if route_enabled else " t iniciar "
         border_label(put, route_y + route_height - 1, route_x + route_width - len(route_action) - 3, route_action, red, bottom=True)
+        hit(route_y + route_height - 1, route_x + route_width - len(route_action) - 3,
+            len(route_action) + 2, "key", ord("t"))
         if hops:
             position = f" {hop_index + 1}/{len(hops)} "
             border_label(put, route_y + route_height - 1, route_x + 2, position, red, bottom=True)
@@ -613,6 +631,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
             loss = f"{hop.lost / hop.sent:.0%}" if hop.sent else "—"
             rtts = " ".join(f"{value:>{rtt_width}}" for value in times)
             row = route_y + 2 + index - start
+            hit(row, route_x + 1, route_width - 2, "hop", index)
             prefix = f"{ttl:2} {label[:name_width]:<{name_width}} {rtts} "
             put(row, route_x + 2, prefix + " " * (loss_width - 5) + f"{loss:>5}", style)
             draw_loss_meter(put, row, route_x + 2 + len(prefix), hop, segments,
@@ -634,6 +653,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     for key, action in actions:
         put(height - 1, x, key, cyan | bold)
         put(height - 1, x + len(key) + 1, action, curses.A_DIM)
+        hit(height - 1, x, len(key) + len(action) + 1, "key", 9 if key == "Tab" else ord(key))
         x += len(key) + len(action) + 3
     return max(1, visible_hops if route_focus else table_height - 3)
 
@@ -643,6 +663,11 @@ def dashboard(screen, hosts, interval, versions=()):
     screen.keypad(True)
     curses.set_escdelay(35)
     screen.timeout(150)
+    wheel_up = getattr(curses, "BUTTON4_PRESSED", 0)
+    wheel_down = getattr(curses, "BUTTON5_PRESSED", 0)
+    click = curses.BUTTON1_PRESSED
+    curses.mousemask(click | wheel_up | wheel_down)
+    curses.mouseinterval(0)
     if curses.has_colors():
         curses.start_color()
         curses.use_default_colors()
@@ -768,17 +793,57 @@ def dashboard(screen, hosts, interval, versions=()):
             elif query:
                 view_message = f"{message}  ·  Filtro: {query}" if message else f"Filtro: {query}"
             view_index = indices.index(selected) if indices else 0
+            hits = []
             page = draw_dashboard(background, height, width, [monitors[i] for i in indices],
                                   view_index, interval, view_message, hops, hop_index, route_focus,
                                   route_message, route_enabled, ping_enabled, graph_mode,
-                                  query, target_state, reverse, len(monitors), shaded_history, versions)
+                                  query, target_state, reverse, len(monitors), shaded_history, versions, hits)
             if menu:
-                draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background)
+                hits.clear()
+                draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background, hits)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
                 filter_edit = None
                 key = ord("q")
+            if key == curses.KEY_MOUSE:
+                try:
+                    _, mx, my, _, buttons = curses.getmouse()
+                except curses.error:
+                    continue
+                if filter_edit is not None:
+                    continue
+                matches = [
+                    (kind, value) for y, x, rows, cols, kind, value in reversed(hits)
+                    if y <= my < y + rows and x <= mx < x + cols
+                ]
+                if not matches:
+                    continue
+                if buttons & (wheel_up | wheel_down):
+                    panel_kind = next((kind for kind, _ in matches if kind in ("targets", "hops")), None)
+                    if panel_kind is None:
+                        continue
+                    route_focus = panel_kind == "hops" and route_enabled
+                    if panel_kind == "hops" and not route_focus:
+                        continue
+                    key = curses.KEY_UP if buttons & wheel_up else curses.KEY_DOWN
+                elif buttons & click:
+                    kind, value = matches[0]
+                    if kind == "target":
+                        selected, route_focus = indices[value], False
+                        continue
+                    if kind == "hop":
+                        hop_index, route_focus = value, True
+                        continue
+                    if kind == "menu":
+                        menu_index = value
+                        key = curses.KEY_RIGHT if menu == "Opções" else 10
+                    elif kind == "key":
+                        key = value
+                    else:
+                        continue
+                else:
+                    continue
             if filter_edit is not None:
                 if key == 27:
                     query, selected = filter_edit
