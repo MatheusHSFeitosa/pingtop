@@ -61,7 +61,7 @@ def probe(host):
 class Monitor:
     host: str
     status: str = "AGUARDE"
-    history: deque = field(default_factory=lambda: deque(maxlen=60))
+    history: deque = field(default_factory=lambda: deque(maxlen=512))
     sent: int = 0
     lost: int = 0
     pending: object = None
@@ -127,58 +127,74 @@ def trace(host):
 
 
 def draw_graph(put, y, width, height, monitor, green, red, dim):
-    # Unicode Braille gives two columns and four vertical positions per cell.
-    cols = width - 4
-    log_rows = min(4, max(0, height - 8))
-    rows = height - 5 - log_rows
-    cols -= 8
-    history = list(monitor.history)[-2 * cols:]
+    info_width = width // 2
+    graph_x = info_width
+    cols = width - graph_x - 3
+    rows = height - 3
+    history = list(monitor.history)[-cols:]
     samples = [value for value in history if value is not None]
     peak = max(samples, default=0)
-    average = f"{sum(samples) / len(samples):.2f} ms" if samples else "—"
+    average = sum(samples) / len(samples) if samples else 0
     ip = monitor.address
     if ip is None:
         try:
             ip = str(ipaddress.ip_address(monitor.host))
         except ValueError:
             ip = "—"
-    put(y + 1, 2, f"IP {ip}"[:width - 4], curses.A_BOLD)
-    put(y + 2, 2, f"Sonda {monitor.stamp}  Média {average}"[:width - 4], dim)
-    scale = f"0 ─ Pico {peak:.2f} ms" if samples else "Sem RTT disponível"
-    put(y + height - 2, 2, f"{scale} · {len(history)} amostras"[:width - 4], dim)
-    grid = [[0] * cols for _ in range(rows)]
-    dots = ((1, 2, 4, 64), (8, 16, 32, 128))
-    previous = None
-    gaps = set()
-    for index, value in enumerate(history, 2 * cols - len(history)):
-        col, side = divmod(index, 2)
-        if value is None:
-            gaps.add(col)
-            previous = None
-            continue
-        level = round(value / (peak or 1) * (4 * rows - 1))
-        top = 4 * rows - 1 - level
-        lower = top if previous is None else previous
-        for position in range(min(top, lower), max(top, lower) + 1):
-            row, offset = divmod(position, 4)
-            grid[row][col] |= dots[side][offset]
-        previous = top
-    for row, cells in enumerate(grid):
-        color = curses.color_pair(6 + min(3, row * 4 // rows)) if getattr(curses, "COLORS", 0) >= 256 else green
-        put(y + 3 + row, 10, "".join(chr(0x2800 + cell) if cell else " " for cell in cells), color)
-    if samples:
-        put(y + 3, 2, f"{peak:.2f}"[:7], dim)
-        if rows > 1:
-            put(y + 2 + rows, 2, "0 ms", dim)
-    for col in gaps:
-        if not grid[-1][col]:
-            put(y + 2 + rows, 10 + col, "×", red)
 
-    for row, (stamp, latency, status) in enumerate(list(monitor.log)[-max(1, log_rows):]):
+    for row in range(y + 1, y + height - 1):
+        put(row, graph_x - 1, "┃", dim)
+    border_label(put, y + 1, graph_x + 1, "Gráfico", dim)
+    put(y + 1, 2, f"IP {ip}"[:info_width - 4], curses.A_BOLD)
+    put(y + 2, 2, f"Sonda {monitor.stamp}"[:info_width - 4], dim)
+
+    stats = f"Mín {min(samples):.2f} · Méd {average:.2f} · Máx {peak:.2f} ms" if samples else "Sem RTT disponível"
+    if samples and len(stats) > info_width - 4 and height >= 7:
+        put(y + height - 3, 2, f"Mín {min(samples):.2f} · Méd {average:.2f}"[:info_width - 4], dim)
+        put(y + height - 2, 2, f"Máx {peak:.2f} ms", dim)
+        log_rows = min(4, height - 6)
+    else:
+        if samples and len(stats) > info_width - 4:
+            stats = f"↓{min(samples):.2g} ~{average:.2g} ↑{peak:.2g} ms"
+        put(y + height - 2, 2, stats[:info_width - 4], dim)
+        log_rows = min(4, height - 5)
+    for row, (stamp, latency, status) in enumerate(list(monitor.log)[-log_rows:]):
         value = f"tempo={latency:.2f} ms" if latency is not None else (
             "sem resposta" if status == "TIMEOUT" else "erro de sondagem")
-        put(y + 3 + rows + row, 2, f"{stamp}  {value}"[:width - 4],
+        put(y + 3 + row, 2, f"{stamp} {value}"[:info_width - 4],
             dim if latency is not None else red)
+
+    # Four vertical dots per cell. Plot the same RTT above and below the center.
+    middle = 2 * rows
+    scale = (middle - 1) / (peak or 1)
+    start = graph_x + 1 + cols - len(history)
+    previous = None
+    for index, value in enumerate(history):
+        age = min(3, (len(history) - 1 - index) * 4 // len(history))
+        style = green
+        if getattr(curses, "COLORS", 0) >= 256:
+            style = curses.color_pair(6 + age)
+        if age == 0:
+            style |= curses.A_BOLD
+        elif age >= 2:
+            style |= curses.A_DIM
+
+        if value is None:
+            put(y + 2 + rows // 2, start + index, "×", red | (style & curses.A_DIM))
+            previous = None
+            continue
+
+        amplitude = round(value * scale)
+        near = min(amplitude, previous) if previous is not None else amplitude
+        far = max(amplitude, previous) if previous is not None else amplitude
+        cells = {}
+        for distance in range(near, far + 1):
+            for position in (middle - 1 - distance, middle + distance):
+                row, dot = divmod(position, 4)
+                cells[row] = cells.get(row, 0) | (9, 18, 36, 192)[dot]
+        for row, mask in cells.items():
+            put(y + 2 + row, start + index, chr(0x2800 + mask), style)
+        previous = amplitude
 
 
 MENU_ITEMS = ("Opções", "Ajuda", "Limpar lista", "Sair")
