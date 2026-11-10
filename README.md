@@ -1,6 +1,6 @@
 # PINGTOP
 
-Monitor de ping para Linux com interface de terminal inspirada no btop. Acompanhe até 1.024 alvos, com até 32 pings simultâneos, com latência da última resposta, percentual de perda e histórico visual por alvo.
+Monitor de ping para Linux com interface de terminal inspirada no [btop](https://github.com/aristocratos/btop). Acompanhe a latência, a perda e o histórico de até 1.024 alvos, com até 32 pings simultâneos.
 
 ## Como rodar
 
@@ -21,7 +21,7 @@ Aceita IPv4, IPv6, nomes de host, faixas IPv4 inclusivas e blocos CIDR IPv4.
 
 Você também pode digitar uma faixa ou CIDR pela tecla `a`. No CIDR, o programa usa os endereços de host do bloco, incluindo os dois IPs de um /31 e o IP único de um /32. Alvos repetidos são ignorados. Em listas grandes, as sondagens excedentes aguardam na fila.
 
- Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e adicione os alvos na interface.
+Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e adicione os alvos na interface.
 
 | Tecla | Ação |
 | --- | --- |
@@ -36,22 +36,46 @@ Você também pode digitar uma faixa ou CIDR pela tecla `a`. No CIDR, o programa
 | ? | Abrir ou fechar a ajuda |
 | q | Sair |
 
-A perda é acumulada desde a adição do alvo. O gráfico exibe até 512 amostras recentes, conforme a largura disponível, ajusta a escala ao maior valor exibido e marca amostras sem latência com `×`. O estado `ERRO` indica falha na execução ou na resolução do alvo e fica fora do cálculo de perda.
+## Monitoramento
 
-## Rota e gráfico
+O ping começa automaticamente. A coluna de perda acumula as sondagens desde
+a adição do alvo. O estado `ERRO` indica falha na execução ou na resolução do
+alvo e fica fora do cálculo de perda.
+
+- O histórico mostra as respostas mais recentes primeiro e usa colunas de
+  horário, sequência, TTL e RTT quando há espaço.
+- O gráfico desenha duas amostras por célula. O modo Micro usa glifos Braille
+  com pixels finos. A forma dos pontos depende da fonte ou do terminal. Em
+  Opções, selecione Quadrantes para usar blocos de cantos retos.
+  A leitura mais recente fica à direita. A escala acompanha os RTTs visíveis
+  e as metades espelhadas diferenciam o traçado por cor.
+- Em painéis largos, o quadro lateral exibe o último RTT, o mínimo, a média
+  e o máximo das amostras visíveis. O medidor acompanha o último RTT e esvazia
+  quando a sonda fica sem resposta.
+
+## Tracert
 
 Instale o pacote opcional `traceroute` para usar o Tracert ICMP. Pressione
 `t` para sondar continuamente a rota do alvo selecionado, até 24 saltos.
 Use `Tab` para alternar o foco e as setas para selecionar um salto. A tabela
-mostra o número do salto, o nome ou IP e três RTTs por ciclo, em milissegundos. `*` indica uma tentativa sem resposta. Cada salto tem seu próprio gráfico. A perda intermediária pode
-refletir limitação de respostas ICMP no roteador.
+mostra o número do salto, o nome ou IP e três RTTs por ciclo, em milissegundos.
+`*` indica uma tentativa sem resposta. Cada salto tem seu próprio gráfico.
 
-O gráfico de quadradinhos identifica o IP sondado e o horário local de início
-da última sondagem. Em terminais largos, o histórico e o gráfico ocupam a maior parte da faixa inferior, ao lado do Tracert. Em terminais estreitos, `Tab` troca a lista visível.
+## Terminal e aparência
 
-A curva fica centralizada horizontalmente enquanto preenche a área disponível. A amostra mais recente fica à direita da sequência e as antigas perdem intensidade.
+Em uma janela de pelo menos 96 colunas por 20 linhas, os painéis de detalhes,
+alvos, histórico/gráfico e Tracert aparecem juntos. A interface compacta
+usa pelo menos 48 colunas por 16 linhas e alterna as listas com `Tab`.
+
+No menu principal, use as setas e Enter para abrir Opções, Ajuda, Limpar lista
+ou Sair. Esc volta um nível. Em Opções, use ←/→ para ajustar o intervalo ou
+alternar entre Discreto, Drácula, Nord, Gruvbox e Terminal. As paletas
+personalizadas usam terminais de 256 cores. Limpar lista pede confirmação.
+
+## Testes
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+```
 
 Projeto independente. Licença MIT.
-
-No menu principal, use as setas e Enter para abrir Opções, Ajuda, Limpar lista ou Sair. Esc volta um nível no menu.
-Em Opções, use ←/→ para alternar entre Discreto, Drácula, Nord, Gruvbox e Terminal ou ajustar o intervalo da sessão. As paletas personalizadas usam terminais de 256 cores. Limpar lista pede confirmação antes de remover todos os alvos. Ao lado da curva espelhada, o painel exibe as últimas sondagens do alvo ou salto, com a resposta mais recente no topo, ocupando as linhas disponíveis. A escala se ajusta às sondagens visíveis e informa a referência de RTT no eixo central. O painel largo mostra um quadro lateral com RTT atual, mínimo, médio e máximo. Em painéis estreitos, a escala numérica mostra a amplitude espelhada. O medidor lateral acompanha o último RTT nessa escala e esvazia quando a sonda fica sem resposta. Os valores reais ficam no resumo. O histórico do ping mostra sequência, TTL e RTT, com formato compacto quando a janela é estreita.

@@ -15,6 +15,7 @@ TARGET = re.compile(r"[a-zA-Z0-9:][a-zA-Z0-9_.:%-]{0,252}")
 LATENCY = re.compile(r"time[=<]([\d.]+)\s*ms")
 MAX_TARGETS = 1024
 MAX_WORKERS = 32
+QUADRANTS = " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█"
 
 
 def expand_target(value):
@@ -46,17 +47,22 @@ def probe(host):
             capture_output=True, text=True, timeout=3, env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
         )
     except subprocess.TimeoutExpired:
-        return "TIMEOUT", None, None, stamp
+        return "TIMEOUT", None, None, stamp, None
     except OSError:
-        return "ERRO", None, None, stamp
-    header = re.search(r"^PING .*?\(([^)]+)\)", result.stdout, re.MULTILINE)
+        return "ERRO", None, None, stamp, None
+    header = re.search(r"^PING [^\n]*?\(([^()]+)\)", result.stdout, re.MULTILINE)
     address = header[1] if header else None
+    if address is None:
+        try:
+            address = str(ipaddress.ip_address(host))
+        except ValueError:
+            pass
     match = LATENCY.search(result.stdout)
     if result.returncode == 0 and match:
-        reply = re.search(r"^(\d+) bytes from .*?\bttl=(\d+)", result.stdout, re.MULTILINE)
+        reply = re.search(r"^(\d+) bytes from .*?\b(?:ttl|hlim)=(\d+)", result.stdout, re.MULTILINE)
         details = (int(reply[1]), int(reply[2])) if reply else None
         return "OK", float(match[1]), address, stamp, details
-    return ("TIMEOUT" if result.returncode == 1 else "ERRO"), None, address, stamp
+    return ("TIMEOUT" if result.returncode == 1 else "ERRO"), None, address, stamp, None
 
 
 @dataclass
@@ -104,10 +110,14 @@ def panel(put, y, x, height, width, title, color):
     put(y + height - 1, x, "└" + "─" * (width - 2) + "┘", color)
 
 
-def border_label(put, y, x, title, color):
-    put(y, x, "┐", color)
-    put(y, x + 1, title, curses.A_BOLD)
-    put(y, x + len(title) + 1, "┌", color)
+def border_label(put, y, x, title, color, *, bottom=False):
+    put(y, x, "┘" if bottom else "┐", color)
+    if title and title[0] in "¹²³⁴":
+        put(y, x + 1, title[0], color | curses.A_BOLD)
+        put(y, x + 2, title[1:], curses.A_BOLD)
+    else:
+        put(y, x + 1, title, curses.A_BOLD)
+    put(y, x + len(title) + 1, "└" if bottom else "┌", color)
 
 
 def trace(host):
@@ -122,13 +132,17 @@ def trace(host):
     except (OSError, subprocess.TimeoutExpired):
         return [], "A sondagem da rota falhou."
     if result.returncode:
-        return [], "Falha no traceroute ICMP. Confira as permissões."
+        detail = next((line.strip() for line in result.stderr.splitlines() if line.strip()), "")
+        message = f"Tracert: {detail}" if detail else f"Tracert: falhou (código {result.returncode})."
+        return [], message
     return parse_route(result.stdout, stamp), ""
 
 
 def parse_route(output, stamp):
     hops = []
-    tokens = re.compile(r"([^\s()]+) \(([^()]+)\)|(\d+(?:\.\d+)?) ms|\*")
+    tokens = re.compile(
+        r"([^\s()]+)\s+\(([^()]+)\)|(\d+(?:\.\d+)?)\s+ms|\*|(!\S+)|(\S+)"
+    )
     for line in output.splitlines():
         match = re.match(r"^\s*(\d+)\s+(.*)", line)
         if not match:
@@ -140,138 +154,158 @@ def parse_route(output, stamp):
                 name, address = token[1], token[2]
             elif token[3]:
                 probes.append((name, address, float(token[3])))
-            else:
+            elif token[0] == "*":
                 probes.append((None, None, None))
+            elif token[5]:
+                try:
+                    address = str(ipaddress.ip_address(token[5]))
+                except ValueError:
+                    continue
+                name = address
         if probes:
             hops.append((int(match[1]), tuple(probes[:3]), stamp))
     return hops
 
 
-def draw_graph(put, y, width, height, monitor, green, red, dim):
-    info_width = max(22, width // 3)
-    graph_x = info_width
-    show_scale = width - graph_x >= 24 and height >= 9
-    inset = show_scale and width - graph_x >= 48 and height >= 11
-    scale_width = 18 if inset else 10 if show_scale else 0
-    cols = width - graph_x - 3 - scale_width
-    rows = height - (4 if show_scale else 3)
-    history = list(monitor.history)[-cols:]
-    samples = [value for value in history if value is not None]
-    peak = max(samples, default=0)
-    minimum = min(samples, default=0)
-    average = sum(samples) / len(samples) if samples else 0
-    ip = monitor.address
-    if ip is None:
-        try:
-            ip = str(ipaddress.ip_address(monitor.host))
-        except ValueError:
-            ip = "—"
+def rtt_text(value):
+    return f"{value:.2f}" if value is not None else "—"
 
-    for row in range(y + 1, y + height - 1):
-        put(row, graph_x - 1, "│", dim)
-    border_label(put, y + 1, graph_x + 1, "Δ RTT (ms)" if show_scale else "Gráfico", dim)
-    put(y + 1, 2, f"IP {ip}"[:info_width - 4], curses.A_BOLD)
-    put(y + 2, 2, f"Sonda {monitor.stamp}"[:info_width - 4], dim)
 
-    stats = f"Mín {min(samples):.2f} · Méd {average:.2f} · Máx {peak:.2f} ms" if samples else "Sem RTT disponível"
-    if samples and len(stats) > info_width - 4 and height >= 7:
-        put(y + height - 3, 2, f"Mín {min(samples):.2f} · Méd {average:.2f}"[:info_width - 4], dim)
-        put(y + height - 2, 2, f"Máx {peak:.2f} ms", dim)
-        log_rows = height - 6
+def draw_history(put, y, width, height, monitor, red, dim):
+    put(y + 1, 2, "Histórico de sondas"[:width], curses.A_BOLD)
+    full = width >= 24
+    seq_width = min(7, max(4, width - 20))
+    if full:
+        heading = f"{'HORA':8} {'SEQ':>{seq_width}} {'TTL':>3} {'RTT':>6}"
+    elif width >= 20:
+        heading = "HORA       RTT (ms)"
     else:
-        if samples and len(stats) > info_width - 4:
-            stats = f"↓{min(samples):.2g} ~{average:.2g} ↑{peak:.2g} ms"
-        put(y + height - 2, 2, stats[:info_width - 4], dim)
-        log_rows = height - 5
-    entries = list(reversed(monitor.log))[:log_rows]
-    for row, (stamp, latency, status, sequence, details) in enumerate(entries):
-        value = f"tempo={latency:.2f} ms" if latency is not None else (
-            "sem resposta" if status == "TIMEOUT" else "erro de sondagem")
-        if not monitor.route_probes:
-            if details:
-                size, ttl = details
-                value = f"{size} bytes de {ip}: icmp_seq={sequence} ttl={ttl} {value}"
-            else:
-                value = f"icmp_seq={sequence} {value}"
-        compact = f"#{sequence} ttl={details[1]} {latency:.2f} ms" if details else value
-        line = f"{stamp} {value}"
-        if len(line) > info_width - 4:
-            line = f"{stamp} {compact}"
-        if len(line) > info_width - 4:
-            line = compact
-        put(y + 3 + row, 2, line[:info_width - 4],
-            dim if latency is not None else red)
-
-    # Reserve the middle row for the axis and mirror every plotted cell around it.
-    center = y + 2 + rows // 2
-    half = (rows - 1) // 2
-    graph_left = graph_x + 1
-    put(center, graph_left, "·" * cols, dim | curses.A_DIM)
-    # Keep a visible base for steady links and use most of the height for variation.
-    spread = max(peak - minimum, 0.05)
-    floor = max(0.0, minimum - spread * 0.6)
-    span = max((peak - floor) * 1.12, 0.05)
-    if show_scale:
-        meter_x = graph_left + cols
-        axis_x = meter_x + 1
-        latest = history[-1] if history else None
-        level = round((latest - floor) * half / span) if latest is not None else 0
-        for step in range(1, half + 1):
-            active = step <= level
-            put(center - step, meter_x, "█" if active else "░",
-                green | curses.A_BOLD if active else dim | curses.A_DIM)
-        if inset:
-            panel(put, center - 3, axis_x, 7, scale_width - 1, "RTT / ms", dim)
-            readings = (
-                f"Atual {latest:.2f}" if latest is not None else "Sem resposta",
-                f"Mín   {minimum:.2f}" if samples else "Mín   —",
-                f"Méd   {average:.2f}" if samples else "Méd   —",
-                f"Máx   {peak:.2f}" if samples else "Máx   —",
-            )
-            for offset, reading in enumerate(readings, -2):
-                put(center + offset, axis_x + 2, reading[:scale_width - 5],
-                    green | curses.A_BOLD if offset == -2 else dim)
+        heading = "HORA       RTT"
+    put(y + 2, 2, heading[:width], dim)
+    if height >= 8:
+        put(y + 3, 2, "─" * width, dim | curses.A_DIM)
+        start = 4
+    else:
+        start = 3
+    for row, entry in enumerate(reversed(monitor.log), y + start):
+        if row >= y + height - 1:
+            break
+        stamp, latency, status, sequence, details = entry
+        value = rtt_text(latency) if latency is not None else (
+            "×" if status == "TIMEOUT" else "ERRO")
+        if full:
+            ttl = str(details[1]) if details else "—"
+            seq = str(sequence)
+            if len(seq) > seq_width:
+                seq = "…" + seq[-(seq_width - 1):]
+            line = f"{stamp} {seq:>{seq_width}} {ttl:>3} {value:>6}"
         else:
-            for row in range(center - half, center + half + 1):
-                put(row, axis_x, "│", dim | curses.A_DIM)
-            for row, label in ((center - half, f"+{span:.2f}"),
-                               (center, f"{floor:.2f}"),
-                               (center + half, f"−{span:.2f}")):
-                put(row, axis_x, f"┤{label}"[:scale_width - 1], dim)
-        timeline = "antigas ◀" + " " * (cols - 19) + "▶ recentes"
-        if cols >= 19:
-            put(y + height - 2, graph_left, timeline, dim)
-    if history and cols >= 27 and not inset:
-        latest = history[-1]
-        live = f"RTT {latest:.2f} ms" if latest is not None else "Sem resposta"
-        put(y + 1, graph_left + cols - len(live), live, green | curses.A_BOLD)
-    start = graph_left + (cols - len(history)) // 2
-    for index, value in enumerate(history):
-        age = min(3, (len(history) - 1 - index) * 4 // len(history))
-        style = green
-        if getattr(curses, "COLORS", 0) >= 256:
-            style = curses.color_pair(6 + age)
-        if age == 0:
-            style |= curses.A_BOLD
-        elif age >= 2:
-            style |= curses.A_DIM
+            line = f"{stamp}  {value}"
+        style = red if latency is None else (curses.A_BOLD if row == y + start else 0)
+        put(row, 2, line[:width], style)
 
+
+def braille_cell(mask):
+    dots = (1, 8, 2, 16, 4, 32, 64, 128)
+    return chr(0x2800 + sum(dot for bit, dot in enumerate(dots) if mask & (1 << bit)))
+
+
+def draw_graph(put, y, width, height, monitor, green, red, dim, graph_mode="Micro"):
+    # The summary floats inside the graph on wide terminals, as in btop's net panel.
+    info_width = min(32, max(24 if width >= 66 else 18, width // 4))
+    graph_x = info_width + 4
+    graph_width = width - graph_x - 2
+    inset = graph_width >= 39 and height >= 10
+    inset_width = 18 if inset else 0
+    cols = graph_width - inset_width
+    body_rows = height - 4
+    plot_rows = body_rows - body_rows % 2
+    top = y + 2 + (body_rows - plot_rows) // 2
+    half = plot_rows // 2
+    history = list(monitor.history)[-2 * cols:]
+    samples = [value for value in history if value is not None]
+    latest = history[-1] if history else None
+    minimum = min(samples, default=None)
+    peak = max(samples, default=None)
+    average = sum(samples) / len(samples) if samples else None
+
+    draw_history(put, y, info_width, height, monitor, red, dim)
+    for row in range(y + 1, y + height - 1):
+        put(row, graph_x - 1, "│", dim | curses.A_DIM)
+    heading = "Variação de RTT" if inset else f"RTT {rtt_text(latest)} ms"
+    put(y + 1, graph_x, heading[:graph_width], curses.A_BOLD)
+
+    # Two samples per cell, with four vertical microdots or two block pixels.
+    # Preserve the two halves independently so each can use its own palette.
+    spread = max((peak or 0) - (minimum or 0), 0.05)
+    floor = max(0.0, (minimum or 0) - spread * 0.45)
+    span = max(((peak or 0) - floor) * 1.08, 0.05)
+    micro = graph_mode == "Micro"
+    cell_depth = 4 if micro else 2
+    pixel_height = half * cell_depth
+    grid = [[0] * cols for _ in range(half)]
+    start = 2 * cols - len(history)
+    gaps = set()
+    for index, value in enumerate(history, start):
+        col, side = divmod(index, 2)
         if value is None:
-            put(center, start + index, "×", red | (style & curses.A_DIM))
+            gaps.add(col)
             continue
+        amplitude = max(1, round((value - floor) * pixel_height / span))
+        for step in range(amplitude):
+            row, subpixel = divmod(step, cell_depth)
+            grid[row][col] |= 1 << (side + 2 * (cell_depth - 1 - subpixel))
 
-        amplitude = max(1, round((value - floor) * half / span)) if half else 0
-        lower_style = dim | (style & (curses.A_BOLD | curses.A_DIM))
-        if amplitude == 0:
-            put(center, start + index, "▪", style)
-        for distance in range(1, amplitude + 1):
-            put(center - distance, start + index, "▪", style)
-            put(center + distance, start + index, "▪", lower_style)
+    recent_col = (start + len(history) - 1) // 2
+    used_cols = max(1, recent_col - start // 2 + 1)
+    color = getattr(curses, "COLORS", 0) >= 256
+    for row, cells in enumerate(grid):
+        for col, mask in enumerate(cells):
+            if not mask:
+                continue
+            age = min(3, (recent_col - col) * 4 // used_cols)
+            emphasis = curses.A_BOLD if age == 0 else (curses.A_DIM if age >= 2 else 0)
+            upper_style = curses.color_pair(6 + age) if color else green
+            lower_style = curses.color_pair(10 + age) if color else dim
+            # Stipple full cells so a flat run looks like pixels, not a solid rectangle.
+            if not micro and mask == 15:
+                mask = 9 if (row + col) % 2 == 0 else 6
+            mirrored = sum(((mask >> (2 * level)) & 3) << (2 * (cell_depth - 1 - level))
+                           for level in range(cell_depth))
+            if micro:
+                upper = braille_cell(mask)
+                lower = braille_cell(mirrored)
+            else:
+                upper, lower = QUADRANTS[mask], QUADRANTS[mirrored]
+            put(top + half - 1 - row, graph_x + col, upper, upper_style | emphasis)
+            put(top + half + row, graph_x + col, lower, lower_style | emphasis)
+    for col in gaps:
+        if not grid[0][col]:
+            put(top + half - 1, graph_x + col, "×", red)
+    if not history:
+        put(top + half - 1, graph_x, "Aguardando sondagem"[:cols], dim | curses.A_DIM)
+
+    level = round((latest - floor) * 9 / span) if latest is not None else 0
+    meter = "■" * level + "·" * (9 - level)
+    if inset:
+        axis_x = graph_x + cols + 1
+        card_y = y + (height - 7) // 2
+        panel(put, card_y, axis_x, 7, inset_width - 1, "RTT / ms", dim | curses.A_DIM)
+        for offset, (label, value) in enumerate(
+            (("Atual", latest), ("Mín", minimum), ("Méd", average), ("Máx", peak)), 1
+        ):
+            reading = "×" if offset == 1 and history and latest is None else rtt_text(value)
+            put(card_y + offset, axis_x + 2, f"{label:<5} {reading:>7}"[:inset_width - 5],
+                green | curses.A_BOLD if offset == 1 else 0)
+        put(card_y + 5, axis_x + 2, "RTT " + meter, green)
+    else:
+        compact = f"{meter}  méd {rtt_text(average)}  máx {rtt_text(peak)}"
+        put(y + height - 2, graph_x, compact[:graph_width], dim)
 
 
 MENU_ITEMS = ("Opções", "Ajuda", "Limpar lista", "Sair")
 THEMES = {
-    "Discreto": ((67, 114, 179, 167, 103), (229, 149, 114, 72)),
+    "Discreto": ((67, 114, 179, 167, 103), (153, 111, 68, 61)),
     "Drácula": ((117, 84, 228, 203, 141), (212, 141, 117, 84)),
     "Nord": ((110, 150, 222, 174, 139), (222, 152, 110, 67)),
     "Gruvbox": ((108, 142, 214, 167, 175), (229, 214, 142, 108)),
@@ -279,7 +313,7 @@ THEMES = {
 }
 
 
-def draw_menu(put, height, width, view, index, interval, theme):
+def draw_menu(put, height, width, view, index, interval, theme, graph_mode):
     menu_width = min(56, width - 4)
     y, x = (height - 11) // 2, (width - menu_width) // 2
     accent = curses.color_pair(4)
@@ -294,7 +328,8 @@ def draw_menu(put, height, width, view, index, interval, theme):
         lines = MENU_ITEMS
     elif view == "Opções":
         lines = (f"Intervalo  ‹ {interval:g} s ›",
-                 f"Tema       ‹ {theme} ›")
+                 f"Tema       ‹ {theme} ›",
+                 f"Gráfico    ‹ {graph_mode} ›")
     elif view == "Limpar lista":
         lines = ("Remover todos os alvos desta sessão?", "Cancelar", "Limpar tudo")
     else:
@@ -314,7 +349,7 @@ def draw_menu(put, height, width, view, index, interval, theme):
 
 
 def draw_dashboard(put, height, width, monitors, selected, interval, message,
-                   hops, hop_index, route_focus, route_message, route_enabled, ping_enabled):
+                   hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode="Micro"):
     cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
     bold = curses.A_BOLD
     if width < 48 or height < 16:
@@ -325,7 +360,9 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     width -= 1
     panel(put, 0, 0, 3, width, "PINGTOP / ICMP", cyan)
     border_label(put, 0, width - 12, "Esc menu", cyan)
-    put(1, 2, f"{len(monitors)} alvos  ·  {interval:g}s  ·  p Ping {'ativo' if ping_enabled else 'pausado'}", bold)
+    put(1, 2, f"{len(monitors)} alvos  ·  ping {'ativo' if ping_enabled else 'pausado'}", bold)
+    timing = f"{time.strftime('%H:%M:%S')}  ·  {interval:g} s"
+    put(1, width - len(timing) - 2, timing, cyan)
     wide = width >= 95 and height >= 20
     details_width = width * 3 // 10
     table_x = details_width + 1 if wide else 0
@@ -333,7 +370,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     chart_width = min(width * 3 // 5, width - 40) if wide else width
     route_x = chart_width + 1 if wide else 0
     route_width = width - route_x
-    split = (height - 8) * 2 // 5 if wide else 0
+    split = max(6, (height - 8) // 3) if wide else 0
     chart_y = 3 + split + int(wide)
     chart_height = height - chart_y - 4 if wide else max(6, (height - 6) // 2)
     route_y = chart_y if wide else chart_y + chart_height
@@ -367,9 +404,11 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
             for row, (line, style) in enumerate(details[:split - 2], 4):
                 put(row, 2, line[:details_width - 4], style)
     title = f"3 Gráfico / salto {hops[hop_index][0]}" if route_focus and current_hop else "3 Gráfico / alvo"
+    if chart:
+        title += f" · {chart.address or chart.host}"
     panel(put, chart_y, 0, chart_height, chart_width, title, purple)
     if chart:
-        draw_graph(put, chart_y, chart_width, chart_height, chart, green, red, purple)
+        draw_graph(put, chart_y, chart_width, chart_height, chart, green, red, purple, graph_mode)
     else:
         put(chart_y + 1, 2, "Pressione a para adicionar um alvo.", yellow)
 
@@ -377,7 +416,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         panel(put, table_y, table_x, table_height, table_width, "2 Alvos monitorados",
               cyan | (0 if route_focus else bold))
         position = f" {selected + 1 if monitors else 0}/{len(monitors)} "
-        border_label(put, table_y + table_height - 1, table_x + table_width - len(position) - 3, position, cyan)
+        border_label(put, table_y + table_height - 1, table_x + table_width - len(position) - 3, position, cyan, bottom=True)
         name_width = table_width - 31
         put(table_y + 1, table_x + 2,
             f"{'ALVO':<{name_width}} {'ESTADO':<8} {'RTT':>9} {'PERDA':>6}", bold)
@@ -396,11 +435,14 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     if wide or route_focus:
         panel(put, route_y, route_x, route_height, route_width, "4 Tracert / ICMP", red)
         route_action = " t parar " if route_enabled else " t iniciar "
-        border_label(put, route_y + route_height - 1, route_x + route_width - len(route_action) - 3, route_action, red)
+        border_label(put, route_y + route_height - 1, route_x + route_width - len(route_action) - 3, route_action, red, bottom=True)
+        if hops:
+            position = f" {hop_index + 1}/{len(hops)} "
+            border_label(put, route_y + route_height - 1, route_x + 2, position, red, bottom=True)
         name_width = route_width - 30
         put(route_y + 1, route_x + 2,
             f"{'Nº':>2} {'HOST / IP':<{name_width}} {'RTT1 ms':>7} {'RTT2 ms':>7} {'RTT3 ms':>7}", bold)
-        visible_hops = route_height - 3
+        visible_hops = route_height - 3 - bool(hops and route_message)
         start = max(0, hop_index - visible_hops + 1)
         for index, (ttl, hop) in enumerate(hops[start:start + visible_hops], start):
             times = [f"{value:.2f}" if value is not None else "*"
@@ -419,20 +461,26 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
                 (route_message or "t Iniciar rota")[:route_width - 4], yellow)
 
     put(height - 2, 2, message, yellow)
-    if wide:
-        actions = ("p Ping", "t Tracert", "Tab Foco", "a Adicionar", "d Remover", "q Sair")
-        for index, action in enumerate(actions):
-            x = width * index // len(actions)
-            size = width * (index + 1) // len(actions) - x
-            put(height - 1, x, "│" + action.center(size - 2) + "│", cyan | bold)
-    else:
-        put(height - 1, 1, "p Ping  t Rota  Tab Foco  a Adic.  d Rem.  q Sair", cyan | bold)
-    return max(1, (route_height if route_focus else table_height) - 3)
+    actions = (
+        ("p", ("Pausar" if ping_enabled else "Retomar") if wide else "Ping"),
+        ("t", "Rota"),
+        ("Tab", "Foco"),
+        ("a", "Adic." if wide else "+"),
+        ("d", "Rem." if wide else "−"),
+        ("q", "Sair"),
+    )
+    x = 1
+    for key, action in actions:
+        put(height - 1, x, key, cyan | bold)
+        put(height - 1, x + len(key) + 1, action, curses.A_DIM)
+        x += len(key) + len(action) + 3
+    return max(1, visible_hops if route_focus else table_height - 3)
 
 
 def dashboard(screen, hosts, interval):
     curses.curs_set(0)
     screen.keypad(True)
+    curses.set_escdelay(35)
     screen.timeout(150)
     if curses.has_colors():
         curses.start_color()
@@ -451,7 +499,11 @@ def dashboard(screen, hosts, interval):
         if curses.COLORS >= 256:
             for index, color in enumerate(gradient or (curses.COLOR_GREEN,) * 4, 6):
                 curses.init_pair(index, color, -1)
+            reverse_gradient = (218, 176, 133, 90) if palette else (curses.COLOR_MAGENTA,) * 4
+            for index, color in enumerate(reverse_gradient, 10):
+                curses.init_pair(index, color, -1)
 
+    graph_mode = "Micro"
     theme = next(iter(THEMES))
     apply_theme(theme)
 
@@ -464,6 +516,7 @@ def dashboard(screen, hosts, interval):
     menu_index = 0
     route_enabled = route_focus = False
     route_target = route_pending = None
+    route_generation = 0
     route_message = ""
     next_trace = 0
     hops = []
@@ -479,14 +532,15 @@ def dashboard(screen, hosts, interval):
             target = monitors[selected] if monitors and route_enabled else None
             if target is not route_target:
                 route_target = target
+                route_generation += 1
                 hops = []
                 hop_index = 0
                 next_trace = 0
                 route_message = "Sondando rota…" if target else ""
             if route_pending and route_pending[1].done():
-                traced, future = route_pending
+                generation, future = route_pending
                 route_pending = None
-                if traced is target:
+                if generation == route_generation:
                     results, route_message = future.result()
                     previous = dict(hops)
                     if results:
@@ -508,7 +562,7 @@ def dashboard(screen, hosts, interval):
                         hop_index = min(hop_index, len(hops) - 1)
                     next_trace = now + max(1, interval)
             if target and route_pending is None and now >= next_trace:
-                route_pending = (target, routes.submit(trace, target.address or target.host))
+                route_pending = (route_generation, routes.submit(trace, target.address or target.host))
 
             screen.erase()
             height, width = screen.getmaxyx()
@@ -524,9 +578,9 @@ def dashboard(screen, hosts, interval):
                 put(y, x, value, curses.A_DIM if menu else style)
 
             page = draw_dashboard(background, height, width, monitors, selected, interval, message,
-                                  hops, hop_index, route_focus, route_message, route_enabled, ping_enabled)
+                                  hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode)
             if menu:
-                draw_menu(put, height, width, menu, menu_index, interval, theme)
+                draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
@@ -543,7 +597,7 @@ def dashboard(screen, hosts, interval):
                     menu = None if menu == "Menu" else "Menu"
                     menu_index = 0
                 elif key in (curses.KEY_UP, curses.KEY_DOWN) and menu != "Ajuda":
-                    size = len(MENU_ITEMS) if menu == "Menu" else 2
+                    size = {"Menu": len(MENU_ITEMS), "Opções": 3, "Limpar lista": 2}[menu]
                     menu_index = (menu_index + (1 if key == curses.KEY_DOWN else -1)) % size
                 elif key in (10, 13, curses.KEY_ENTER) and menu == "Menu":
                     menu = MENU_ITEMS[menu_index]
@@ -568,11 +622,13 @@ def dashboard(screen, hosts, interval):
                         delta = 0.5 if key == curses.KEY_RIGHT else -0.5
                         interval = max(0.5, min(60, interval + delta))
                         next_probe = next_trace = 0
-                    else:
+                    elif menu_index == 1:
                         names = tuple(THEMES)
                         delta = 1 if key == curses.KEY_RIGHT else -1
                         theme = names[(names.index(theme) + delta) % len(names)]
                         apply_theme(theme)
+                    else:
+                        graph_mode = "Quadrantes" if graph_mode == "Micro" else "Micro"
                 if key != ord("q"):
                     continue
             if key == ord("q"):
