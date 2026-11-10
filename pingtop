@@ -283,14 +283,17 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     border_label(put, 0, width - 12, "Esc menu", cyan)
     put(1, 2, f"{len(monitors)} alvos  ·  {interval:g}s  ·  p Ping {'ativo' if ping_enabled else 'pausado'}", bold)
     wide = width >= 95 and height >= 20
-    left = width // 2 if wide else width
-    right = width - left if wide else width
-    split = (height - 6) // 2 if wide else 0
-    chart_y = 3 + split
-    chart_height = height - chart_y - 3 if wide else max(6, (height - 6) // 2)
-    table_x = left if wide else 0
+    details_width = width * 3 // 10
+    table_x = details_width + 1 if wide else 0
+    table_width = width - table_x
+    chart_width = min(width * 3 // 5, width - 40) if wide else width
+    route_x = chart_width + 1 if wide else 0
+    route_width = width - route_x
+    split = (height - 8) * 2 // 5 if wide else 0
+    chart_y = 3 + split + int(wide)
+    chart_height = height - chart_y - 4 if wide else max(6, (height - 6) // 2)
     route_y = chart_y if wide else chart_y + chart_height
-    table_y = route_y if route_focus and not wide else (3 if wide else route_y)
+    table_y = 3 if wide else route_y
     table_height = split if wide else height - table_y - 3
     route_height = chart_height if wide else table_height
     target = monitors[selected] if monitors else None
@@ -298,34 +301,40 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     chart = current_hop if route_focus and current_hop else target
 
     if wide:
-        panel(put, 3, 0, split, left, "1 Alvo selecionado", purple)
+        panel(put, 3, 0, split, details_width, "1 Alvo selecionado", purple)
         if target:
-            put(4, 2, target.host[:left - 4], bold)
-            put(5, 2, f"Estado {target.status}  ·  Enviados {target.sent}  ·  Perdidos {target.lost}"[:left - 4])
             last = target.history[-1] if target.history else None
             rtt = f"{last:.2f} ms" if last is not None else "—"
-            put(6, 2, f"Último RTT {rtt}  ·  Ping {target.stamp}"[:left - 4])
-        if route_focus and current_hop and split >= 8:
-            for index, (name, address, rtt) in enumerate(current_hop.route_probes, 1):
-                if 6 + index >= 3 + split - 1:
-                    break
-                response = "*" if rtt is None else f"{address} {rtt:.3f} ms"
-                if name and name != address:
-                    response += f" · {name}"
-                put(6 + index, 2, f"Sonda {index}  {response}"[:left - 4], purple)
+            loss = f"{target.lost / target.sent:.1%}" if target.sent else "—"
+            lines = (
+                (f"ALVO    {target.host}", bold),
+                (f"ESTADO  {target.status}   RTT {rtt}", green if target.status == "OK" else yellow),
+                (f"PERDA   {loss} ({target.lost}/{target.sent})", 0),
+                (f"ENVIOS  {target.sent}   RECEB. {target.sent - target.lost}", 0),
+                (f"PING    {target.stamp}", 0),
+            )
+            details = list(lines)
+            if route_focus and current_hop:
+                for index, (name, address, rtt) in enumerate(current_hop.route_probes, 1):
+                    response = "*" if rtt is None else f"{address} {rtt:.3f} ms"
+                    if name and name != address:
+                        response += f" · {name}"
+                    details.append((f"Sonda {index}  {response}", purple))
+            for row, (line, style) in enumerate(details[:split - 2], 4):
+                put(row, 2, line[:details_width - 4], style)
     title = f"3 Gráfico / salto {hops[hop_index][0]}" if route_focus and current_hop else "3 Gráfico / alvo"
-    panel(put, chart_y, 0, chart_height, left, title, purple)
+    panel(put, chart_y, 0, chart_height, chart_width, title, purple)
     if chart:
-        draw_graph(put, chart_y, left, chart_height, chart, green, red, purple)
+        draw_graph(put, chart_y, chart_width, chart_height, chart, green, red, purple)
     else:
         put(chart_y + 1, 2, "Pressione a para adicionar um alvo.", yellow)
 
     if wide or not route_focus:
-        panel(put, table_y, table_x, table_height, right, "2 Alvos monitorados",
+        panel(put, table_y, table_x, table_height, table_width, "2 Alvos monitorados",
               cyan | (0 if route_focus else bold))
         position = f" {selected + 1 if monitors else 0}/{len(monitors)} "
-        border_label(put, table_y + table_height - 1, table_x + right - len(position) - 3, position, cyan)
-        name_width = right - 31
+        border_label(put, table_y + table_height - 1, table_x + table_width - len(position) - 3, position, cyan)
+        name_width = table_width - 31
         put(table_y + 1, table_x + 2,
             f"{'ALVO':<{name_width}} {'ESTADO':<8} {'RTT':>9} {'PERDA':>6}", bold)
         visible = table_height - 3
@@ -341,11 +350,11 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
                 f"{monitor.host[:name_width]:<{name_width}} {monitor.status:<8} {latency:>9} {loss:>6}", style)
 
     if wide or route_focus:
-        panel(put, route_y, table_x, route_height, right, "4 Tracert / ICMP", red)
+        panel(put, route_y, route_x, route_height, route_width, "4 Tracert / ICMP", red)
         route_action = " t parar " if route_enabled else " t iniciar "
-        border_label(put, route_y + route_height - 1, table_x + right - len(route_action) - 3, route_action, red)
-        name_width = right - 30
-        put(route_y + 1, table_x + 2,
+        border_label(put, route_y + route_height - 1, route_x + route_width - len(route_action) - 3, route_action, red)
+        name_width = route_width - 30
+        put(route_y + 1, route_x + 2,
             f"{'Nº':>2} {'HOST / IP':<{name_width}} {'RTT1 ms':>7} {'RTT2 ms':>7} {'RTT3 ms':>7}", bold)
         visible_hops = route_height - 3
         start = max(0, hop_index - visible_hops + 1)
@@ -359,14 +368,21 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
             label = hop.route_names
             if len(label) > name_width and hop.address:
                 label = hop.address + (" +" if "," in hop.route_names else "")
-            put(route_y + 2 + index - start, table_x + 2,
+            put(route_y + 2 + index - start, route_x + 2,
                 f"{ttl:2} {label[:name_width]:<{name_width}} " + " ".join(f"{value:>7}" for value in times), style)
         if not hops or route_message:
-            put(route_y + route_height - 2, table_x + 2,
-                (route_message or "t Iniciar rota")[:right - 4], yellow)
+            put(route_y + route_height - 2, route_x + 2,
+                (route_message or "t Iniciar rota")[:route_width - 4], yellow)
 
     put(height - 2, 2, message, yellow)
-    put(height - 1, 1, "t Rota  Tab Foco  a Adic.  d Rem.  m Menu  q Sair", cyan | bold)
+    if wide:
+        actions = ("p Ping", "t Tracert", "Tab Foco", "a Adicionar", "d Remover", "q Sair")
+        for index, action in enumerate(actions):
+            x = width * index // len(actions)
+            size = width * (index + 1) // len(actions) - x
+            put(height - 1, x, "│" + action.center(size - 2) + "│", cyan | bold)
+    else:
+        put(height - 1, 1, "p Ping  t Rota  Tab Foco  a Adic.  d Rem.  q Sair", cyan | bold)
     return max(1, (route_height if route_focus else table_height) - 3)
 
 

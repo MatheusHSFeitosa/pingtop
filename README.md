@@ -47,7 +47,7 @@ mostra o número do salto, o nome ou IP e três RTTs por ciclo, em milissegundos
 refletir limitação de respostas ICMP no roteador.
 
 O gráfico de quadradinhos identifica o IP sondado e o horário local de início
-da última sondagem. Em terminais estreitos, `Tab` troca a lista visível.
+da última sondagem. Em terminais largos, o histórico e o gráfico ocupam a maior parte da faixa inferior, ao lado do Tracert. Em terminais estreitos, `Tab` troca a lista visível.
 
 A curva fica centralizada horizontalmente enquanto preenche a área disponível. A amostra mais recente fica à direita da sequência e as antigas perdem intensidade.
 
