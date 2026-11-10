@@ -1,0 +1,28 @@
+name: Windows preview
+
+on:
+  push:
+    tags: ['v*-windows.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - run: python -m pip install windows-curses pyinstaller
+      - run: python -m unittest discover -s tests -p test_windows.py -v
+      - run: python -m PyInstaller --clean --onefile --console --name pingtop pingtop
+      - run: .\dist\pingtop.exe --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pingtop-windows-x64
+          path: dist/pingtop.exe
+          if-no-files-found: error

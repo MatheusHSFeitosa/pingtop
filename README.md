@@ -92,3 +92,17 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 ```
 
 Projeto independente. Licença MIT.
+
+## Windows (prévia)
+
+Baixe `pingtop.exe` na página da versão de teste para Windows x64. Abra o
+Windows Terminal na pasta do arquivo e rode:
+
+```powershell
+.\pingtop.exe 8.8.8.8
+```
+
+A prévia usa o `ping.exe` e o `tracert.exe` nativos. O Tracert usa IPs
+numéricos para evitar atrasos com DNS reverso. A aparência dos glifos e o
+suporte ao fundo do terminal dependem do console. A interface interativa
+ainda precisa ser validada no Windows Terminal.

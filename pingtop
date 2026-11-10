@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Monitor de latência ICMP para terminais Linux."""
+"""Monitor de latência ICMP para terminais Linux e Windows."""
 
 import argparse
 import curses
 import ipaddress
+import os
 import re
 import subprocess
 import time
@@ -39,9 +40,72 @@ def expand_target(value):
     return [value]
 
 
+WINDOWS = os.name == "nt"
+WINDOWS_RTT = re.compile(r"(?:[=<]\s*|(?<!\S))([0-9]+(?:[.,][0-9]+)?)\s*ms\b", re.IGNORECASE)
+
+
+def windows_command(executable, *args, timeout):
+    system = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    return subprocess.run(
+        [os.path.join(system, executable), *args],
+        capture_output=True, text=True, encoding="oem", errors="replace",
+        timeout=timeout, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+
+def parse_windows_ping(output, host, stamp):
+    reply = re.compile(r"^\s*(?:Reply from|Resposta de)\s+(\S+?):\s", re.IGNORECASE)
+    address = None
+    candidates = [host, *re.findall(r"\[([^\]]+)\]", output)]
+    candidates.extend(match[1] for line in output.splitlines() if (match := reply.match(line)))
+    for candidate in candidates:
+        try:
+            address = str(ipaddress.ip_address(candidate))
+        except ValueError:
+            continue
+        break
+    for line in output.splitlines():
+        if not reply.match(line):
+            continue
+        rtt = WINDOWS_RTT.search(line)
+        if not rtt:
+            continue
+        size = re.search(r"bytes[=<]([0-9]+)", line, re.IGNORECASE)
+        ttl = re.search(r"ttl[=<]([0-9]+)", line, re.IGNORECASE)
+        details = (int(size[1]) if size else None, int(ttl[1]) if ttl else None)
+        return "OK", float(rtt[1].replace(",", ".")), address, stamp, details
+    unreachable = re.search(r"timed out|esgotad|unreachable|inacess[ií]vel", output, re.IGNORECASE)
+    return ("TIMEOUT" if unreachable else "ERRO"), None, address, stamp, None
+
+
+def parse_windows_route(output, stamp):
+    hops = []
+    for line in output.splitlines():
+        row = re.match(r"^\s*(\d+)\s+((?:(?:<?\d+\s*ms|\*)\s+){3})(.*?)\s*$", line)
+        if not row:
+            continue
+        address = None
+        name = None
+        tail = row[3].split()
+        if tail:
+            try:
+                address = str(ipaddress.ip_address(tail[-1].strip("[]")))
+                name = tail[0] if len(tail) > 1 else address
+            except ValueError:
+                pass
+        values = re.findall(r"<?\d+\s*ms|\*", row[2])
+        probes = tuple((None, None, None) if value == "*" else
+                       (name, address, float(re.search(r"\d+", value)[0])) for value in values)
+        hops.append((int(row[1]), probes, stamp))
+    return hops
+
+
 def probe(host):
     stamp = time.strftime("%H:%M:%S")
     try:
+        if WINDOWS:
+            result = windows_command("ping.exe", "-n", "1", "-w", "1000", host, timeout=3)
+            return parse_windows_ping(result.stdout, host, stamp)
         result = subprocess.run(
             ["ping", "-n", "-c", "1", "-W", "1", "--", host],
             capture_output=True, text=True, timeout=3, env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
@@ -126,12 +190,16 @@ def border_label(put, y, x, title, color, *, bottom=False, hotkey=False, active=
 def trace(host):
     stamp = time.strftime("%H:%M:%S")
     try:
+        if WINDOWS:
+            result = windows_command("tracert.exe", "-d", "-h", "24", "-w", "500", host, timeout=42)
+            hops = parse_windows_route(result.stdout, stamp)
+            return hops, "" if hops else "Tracert: nenhuma resposta de rota."
         result = subprocess.run(
             ["traceroute", "-I", "-q", "3", "-w", "0.5", "-m", "24", "--", host],
             capture_output=True, text=True, timeout=6, env={"LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
         )
     except FileNotFoundError:
-        return [], "Instale o pacote traceroute."
+        return [], "tracert.exe indisponível." if WINDOWS else "Instale o pacote traceroute."
     except (OSError, subprocess.TimeoutExpired):
         return [], "A sondagem da rota falhou."
     if result.returncode:
@@ -201,7 +269,7 @@ def draw_history(put, y, width, height, monitor, red, dim, shaded=False):
         value = rtt_text(latency) if latency is not None else (
             "×" if status == "TIMEOUT" else "ERRO")
         if full:
-            ttl = str(details[1]) if details else "—"
+            ttl = str(details[1]) if details and details[1] is not None else "—"
             seq = str(sequence)
             if len(seq) > seq_width:
                 seq = "…" + seq[-(seq_width - 1):]
@@ -553,11 +621,18 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
 def dashboard(screen, hosts, interval):
     curses.curs_set(0)
     screen.keypad(True)
-    curses.set_escdelay(35)
+    if hasattr(curses, "set_escdelay"):
+        curses.set_escdelay(35)
     screen.timeout(150)
+    default_fg, default_bg = curses.COLOR_WHITE, curses.COLOR_BLACK
     if curses.has_colors():
         curses.start_color()
-        curses.use_default_colors()
+        try:
+            curses.use_default_colors()
+        except (AttributeError, curses.error):
+            pass
+        else:
+            default_fg = default_bg = -1
 
     theme_background = True
     backgrounds = {"Discreto": 233, "Drácula": 236, "Nord": 237, "Gruvbox": 235, "Terminal": 0}
@@ -571,14 +646,14 @@ def dashboard(screen, hosts, interval):
         colors = (curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_YELLOW,
                   curses.COLOR_RED, curses.COLOR_MAGENTA)
         palette, gradient = THEMES[theme]
-        background = -1
+        background = default_bg
         if theme_background:
             background = backgrounds[theme] if curses.COLORS >= 256 else curses.COLOR_BLACK
         shaded_history = theme_background and curses.COLORS >= 256 and curses.COLOR_PAIRS >= 23
         if shaded_history:
             for index, color in enumerate(HISTORY_GREYS, 15):
                 curses.init_pair(index, max(color, background + 8), background)
-        curses.init_pair(14, curses.COLOR_WHITE if theme_background else -1, background)
+        curses.init_pair(14, curses.COLOR_WHITE if theme_background else default_fg, background)
         screen.bkgdset(" ", curses.color_pair(14))
         if curses.COLORS >= 256 and palette:
             colors = palette
