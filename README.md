@@ -31,9 +31,9 @@ Você também pode digitar uma faixa ou CIDR pela tecla `a`. No CIDR, o programa
 | PgUp / PgDn | Navegar por página |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
-| m | Abrir ou fechar o menu principal |
+| Esc / m | Abrir o menu principal |
 | ? | Abrir ou fechar a ajuda |
-| q / Esc | Sair (Esc volta um nível no menu) |
+| q | Sair |
 
 A perda é acumulada desde a adição do alvo. O gráfico exibe até 60 amostras recentes, ajusta a escala ao maior valor exibido e marca amostras sem latência com `×`. O estado `ERRO` indica falha na execução ou na resolução do alvo e fica fora do cálculo de perda.
 
@@ -51,5 +51,5 @@ da última sondagem. Em terminais estreitos, `Tab` troca a lista visível.
 
 Projeto independente. Licença MIT.
 
-No menu principal, use as setas e Enter para abrir Opções, Ajuda ou Sair.
-Em Opções, use ←/→ para trocar o tema ou ajustar o intervalo da sessão.
+No menu principal, use as setas e Enter para abrir Opções, Ajuda, Limpar lista ou Sair. Esc volta um nível no menu.
+Em Opções, use ←/→ para alternar entre Discreto, Drácula, Nord, Gruvbox e Terminal ou ajustar o intervalo da sessão. As paletas personalizadas usam terminais de 256 cores. Limpar lista pede confirmação antes de remover todos os alvos. O gráfico exibe abaixo da curva as últimas sondagens do alvo ou salto, com horário, RTT ou falha.
