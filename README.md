@@ -1,6 +1,6 @@
 # PINGTOOLs
 
-Monitor de ping para Linux com interface de terminal inspirada no btop. Acompanhe até 32 alvos em paralelo, com latência da última resposta, percentual de perda e histórico visual por alvo.
+Monitor de ping para Linux com interface de terminal inspirada no btop. Acompanhe até 1.024 alvos, com até 32 pings simultâneos, com latência da última resposta, percentual de perda e histórico visual por alvo.
 
 ## Como rodar
 
@@ -12,7 +12,15 @@ cd pingtools
 ./pingtools 127.0.0.1 1.1.1.1 example.com
 ```
 
-Aceita IPv4, IPv6 e nomes de host. Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e adicione os alvos na interface.
+Aceita IPv4, IPv6, nomes de host e faixas IPv4 inclusivas.
+
+```sh
+./pingtools 192.168.1.1-192.168.1.254
+```
+
+Você também pode digitar a mesma faixa pela tecla `a`. Informe os dois IPs completos. Alvos repetidos são ignorados. Em listas grandes, as sondagens excedentes aguardam na fila.
+
+ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e adicione os alvos na interface.
 
 | Tecla | Ação |
 | --- | --- |
