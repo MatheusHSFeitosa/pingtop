@@ -206,18 +206,25 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
     half = (rows - 1) // 2
     graph_left = graph_x + 1
     put(center, graph_left, "─" * cols, dim | curses.A_DIM)
-    span = max(peak - minimum, 1.0)
+    # Keep a visible base for steady links and use most of the height for variation.
+    spread = max(peak - minimum, 0.05)
+    floor = max(0.0, minimum - spread * 0.6)
+    span = max((peak - floor) * 1.12, 0.05)
     if show_scale:
         axis_x = graph_left + cols
         for row in range(center - half, center + half + 1):
             put(row, axis_x, "│", dim | curses.A_DIM)
-        for row, label in ((center - half, f"+{span:.1f}"),
-                           (center, "0"),
-                           (center + half, f"−{span:.1f}")):
+        for row, label in ((center - half, f"+{span:.2f}"),
+                           (center, f"{floor:.2f}"),
+                           (center + half, f"−{span:.2f}")):
             put(row, axis_x, f"┤{label}"[:scale_width], dim)
         timeline = "antigas ◀" + " " * (cols - 19) + "▶ recentes"
         if cols >= 19:
             put(y + height - 2, graph_left, timeline, dim)
+    if history and cols >= 27:
+        latest = history[-1]
+        live = f"RTT {latest:.2f} ms" if latest is not None else "Sem resposta"
+        put(y + 1, graph_left + cols - len(live), live, green | curses.A_BOLD)
     start = graph_left + (cols - len(history)) // 2
     for index, value in enumerate(history):
         age = min(3, (len(history) - 1 - index) * 4 // len(history))
@@ -233,7 +240,7 @@ def draw_graph(put, y, width, height, monitor, green, red, dim):
             put(center, start + index, "×", red | (style & curses.A_DIM))
             continue
 
-        amplitude = max(1, round((value - minimum) * half / span)) if half else 0
+        amplitude = max(1, round((value - floor) * half / span)) if half else 0
         if amplitude == 0:
             put(center, start + index, "▪", style)
         for distance in range(1, amplitude + 1):
