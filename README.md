@@ -34,6 +34,7 @@ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e 
 | s | Alternar entre Todos, Com resposta e Sem resposta |
 | Delete | Limpar filtro de texto |
 | p | Pausar ou retomar o ping contínuo de todos os alvos |
+| n | Abrir NSLOOKUP |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
 | Esc / m | Abrir o menu principal |
@@ -52,7 +53,20 @@ O PINGTOP sonda o hostname da URL por ICMP. Com `-4` ou `-6`, cada
 hostname é resolvido ao carregar e entra no painel com o primeiro IP de
 cada família solicitada que estiver disponível. As duas opções juntas
 geram dois alvos quando houver endereços das duas famílias. As mesmas
-opções se aplicam aos alvos adicionados com `a` durante a sessão.
+opções definem a família inicial para alvos adicionados com `a`. Pressione
+`v` no painel para alternar entre Auto, IPv4, IPv6 e IPv4+IPv6 para as
+próximas inclusões. No modo Auto, URLs carregam as duas famílias disponíveis.
+
+A lista agrupa os IPs sob o hostname da URL. URLs com o mesmo hostname
+compartilham um grupo, pois o caminho e a porta não fazem parte do ping.
+IPs informados diretamente ficam separados.
+
+## Mouse
+
+Em terminais com suporte a eventos de mouse, clique em um alvo ou salto para
+selecioná-lo e use a roda sobre a lista para navegar. Os atalhos nas molduras
+e no rodapé também aceitam clique. No menu, clique em uma opção para abrir
+ou alterar seu valor.
 
 ## Monitoramento
 
@@ -77,6 +91,16 @@ alvo e fica fora do cálculo de perda.
 Enter confirma o filtro de texto e Esc restaura o filtro anterior. Os alvos
 ocultos continuam sendo sondados. Sem resposta mostra alvos cujo último ping
 expirou.
+
+## NSLOOKUP
+
+Pressione `n` ou clique em **n DNS** para abrir a consulta. O alvo selecionado
+preenche o campo. Use Tab para alternar para **Servidor DNS** e digite um IP
+ou hostname, ou deixe vazio para usar o DNS do sistema. Delete limpa o campo
+ativo. O servidor escolhido fica disponível até sair do PINGTOP. Enter consulta o DNS, as setas
+rolam o resultado e Esc fecha o painel. Domínios retornam registros de
+endereço disponíveis, e IPs fazem consulta reversa. No Linux, requer `nslookup` (pacote `dnsutils` no Debian/Ubuntu).
+No Windows, usa `nslookup.exe` do sistema.
 
 ## Tracert
 

@@ -144,6 +144,47 @@ def load_targets(value, versions=()):
     return addresses
 
 
+FAMILIES = {(): "Auto", (4,): "IPv4", (6,): "IPv6", (4, 6): "IPv4+IPv6"}
+
+
+def grouped_targets(value, versions=()):
+    if value.lower().startswith(("http://", "https://")):
+        addresses = load_targets(value, versions or (4, 6))
+        group = urlsplit(value).hostname
+    else:
+        addresses = load_targets(value, versions)
+        numeric = ":" in value or "/" in value or re.fullmatch(r"[0-9.]+(?:-[0-9.]+)?", value)
+        group = value.casefold() if versions and not numeric else None
+    return [(address, group) for address in addresses]
+
+
+def dns_lookup(host, server=""):
+    if not TARGET.fullmatch(host):
+        return ["Informe um hostname ou endereço IP válido."]
+    if server and not TARGET.fullmatch(server):
+        return ["Informe um servidor DNS válido."]
+    args = ["-timeout=2", "-retry=1", host]
+    if server:
+        args.append(server)
+    try:
+        if WINDOWS:
+            result = windows_command("nslookup.exe", *args, timeout=7)
+        else:
+            result = subprocess.run(
+                ["nslookup", *args], capture_output=True, text=True, errors="replace", timeout=7,
+            )
+    except FileNotFoundError:
+        return ["nslookup.exe indisponível." if WINDOWS else
+                "Instale o nslookup (pacote dnsutils no Debian/Ubuntu)."]
+    except subprocess.TimeoutExpired:
+        return ["O servidor DNS não respondeu a tempo."]
+    except OSError:
+        return ["Não foi possível executar o nslookup."]
+    output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    return ["".join(char for char in line.expandtabs(4) if char.isprintable())
+            for line in output.splitlines()] or [f"Sem saída (código {result.returncode})."]
+
+
 def probe(host):
     stamp = time.strftime("%H:%M:%S")
     try:
@@ -188,6 +229,7 @@ class Monitor:
 
     route_probes: tuple = ()
     route_names: str = ""
+    group: str | None = None
 
     def record(self, status, latency, address, stamp, details=None):
         self.status = status
@@ -439,7 +481,7 @@ THEMES = {
 }
 
 
-def draw_menu(put, height, width, view, index, interval, theme, graph_mode, theme_background):
+def draw_menu(put, height, width, view, index, interval, theme, graph_mode, theme_background, hits=None):
     menu_width = min(56, width - 4)
     y, x = (height - 11) // 2, (width - menu_width) // 2
     accent = curses.color_pair(4)
@@ -463,16 +505,42 @@ def draw_menu(put, height, width, view, index, interval, theme, graph_mode, them
         lines = ("a Adicionar  ·  d Remover  ·  t Tracert",
                  "Tab Alternar foco  ·  ↑↓ Selecionar",
                  "PgUp/PgDn Navegar  ·  q Sair",
-                 "p Ping  ·  f Filtro  ·  r Reverter  ·  s Status")
+                 "p Ping · f Filtro · r Reverter · s Status",
+                 "v Família dos novos alvos")
     for row, line in enumerate(lines):
         active = view != "Ajuda" and row == index + (view == "Limpar lista")
         put(y + 4 + row, x + 2, line.ljust(menu_width - 4),
             curses.A_REVERSE | curses.A_BOLD if active else 0)
+        if hits is not None and view != "Ajuda" and (view != "Limpar lista" or row > 0):
+            hits.append((y + 4 + row, x + 2, 1, menu_width - 4,
+                         "menu", row - (view == "Limpar lista")))
     hint = {"Menu": "↑↓ Selecionar  ·  Enter Abrir",
             "Opções": "↑↓ Selecionar  ·  ←→ Alterar",
             "Ajuda": "Esc Voltar",
             "Limpar lista": "↑↓ Selecionar  ·  Enter Confirmar"}[view]
     put(y + 9, x + 2, hint, curses.A_DIM)
+
+
+def draw_lookup(put, height, width, query, server, field, output, offset, busy):
+    if width < 24 or height < 9:
+        return 1
+    box_width, box_height = min(90, width - 4), min(24, height - 2)
+    y, x = (height - box_height) // 2, (width - box_width) // 2
+    accent = curses.color_pair(1)
+    panel(put, y, x, box_height, box_width, "NSLOOKUP / DNS", accent)
+    for index, (label, value) in enumerate((("Host ou IP", query), ("Servidor DNS", server))):
+        active = field == index
+        displayed = value or ("Padrão do sistema" if index and not active else "")
+        room = box_width - len(label) - 7
+        put(y + 1 + index, x + 2, f"{label}: {displayed[-room:]}" + ("▏" if active else ""),
+            curses.A_BOLD if active else 0)
+    lines = ["Consultando DNS…"] if busy else output or ["Digite um domínio ou IP e pressione Enter."]
+    visible = box_height - 5
+    offset = min(offset, max(0, len(lines) - visible))
+    for row, line in enumerate(lines[offset:offset + visible], y + 3):
+        put(row, x + 2, line[:box_width - 4])
+    put(y + box_height - 2, x + 2, "Tab Campo  Enter Consultar  ↑↓ Rolar  Esc Fechar"[:box_width - 4], accent)
+    return visible
 
 
 TARGET_STATES = ("Todos", "Com resposta", "Sem resposta")
@@ -484,9 +552,29 @@ def visible_targets(monitors, query, state, reverse):
     indices = [
         index for index, monitor in enumerate(monitors)
         if (status is None or monitor.status == status)
-        and (query in monitor.host.casefold() or query in (monitor.address or "").casefold())
+        and any(query in name.casefold() for name in (monitor.host, monitor.address or "", monitor.group or ""))
     ]
-    return indices[::-1] if reverse else indices
+    groups = {}
+    for index in indices:
+        groups.setdefault(monitors[index].group or index, []).append(index)
+    ordered = list(groups.values())
+    if reverse:
+        ordered.reverse()
+    return [index for group in ordered for index in group]
+
+
+def target_tree(monitors, show_headers):
+    rows = []
+    for index, monitor in enumerate(monitors):
+        group = monitor.group
+        if group and show_headers and (index == 0 or monitors[index - 1].group != group):
+            rows.append((None, group))
+        label = monitor.host
+        if group:
+            branch = "├─" if index + 1 < len(monitors) and monitors[index + 1].group == group else "└─"
+            label = f"{branch} {label}" if show_headers else f"{label} · {group}"
+        rows.append((index, label))
+    return rows
 
 
 def loss_meter(lost, sent, segments):
@@ -512,7 +600,7 @@ def draw_loss_meter(put, row, x, monitor, segments, muted, warning, critical, se
 
 def draw_dashboard(put, height, width, monitors, selected, interval, message,
                    hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode="Micro",
-                   query="", target_state=0, reverse=False, total=None, shaded_history=False):
+                   query="", target_state=0, reverse=False, total=None, shaded_history=False, versions=(), hits=None):
     cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
     bold = curses.A_BOLD
     if width < 48 or height < 16:
@@ -520,12 +608,22 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         put(1, 0, "Amplie o terminal para pelo menos 48×16.")
         return 1
 
+    def hit(y, x, width, kind, value=0, height=1):
+        if hits is not None:
+            hits.append((y, x, height, width, kind, value))
+
     width -= 1
     panel(put, 0, 0, 3, width, "PINGTOP / ICMP", cyan)
     border_label(put, 0, width - 12, "Esc menu", cyan)
+    hit(0, width - 12, 10, "key", ord("m"))
     put(1, 2, f"{len(monitors) if total is None else total} alvos  ·  ping {'ativo' if ping_enabled else 'pausado'}", bold)
     if width >= 65:
         border_label(put, 0, width - 26, "ping", cyan, hotkey=True, active=not ping_enabled)
+        hit(0, width - 26, 6, "key", ord("p"))
+    if width >= 72:
+        family = f"v: {FAMILIES[versions]}"
+        border_label(put, 0, 25, family, cyan, hotkey=True, active=bool(versions))
+        hit(0, 25, len(family) + 2, "key", ord("v"))
     timing = f"{time.strftime('%H:%M:%S')}  ·  {interval:g} s"
     put(1, width - len(timing) - 2, timing, cyan)
     wide = width >= 95 and height >= 20
@@ -578,13 +676,17 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         put(chart_y + 1, 2, "Nenhum alvo neste filtro." if total else "Pressione a para adicionar um alvo.", yellow)
 
     if wide or not route_focus:
+        hit(table_y, table_x, table_width, "targets", height=table_height)
         panel(put, table_y, table_x, table_height, table_width, "2 Alvos monitorados",
               cyan | (0 if route_focus else bold))
         border_label(put, table_y, table_x + 23, "filtro", cyan, hotkey=True, active=bool(query))
         border_label(put, table_y, table_x + 32, "reverter", cyan, hotkey=True, active=reverse)
+        hit(table_y, table_x + 23, 8, "key", ord("f"))
+        hit(table_y, table_x + 32, 10, "key", ord("r"))
         border_label(put, table_y + table_height - 1, table_x + 2,
                      f"status: {TARGET_STATES[target_state]}", cyan,
                      bottom=True, hotkey=True, active=target_state != 0)
+        hit(table_y + table_height - 1, table_x + 2, 10 + len(TARGET_STATES[target_state]), "key", ord("s"))
         position = f" {selected + 1 if monitors else 0}/{len(monitors)} "
         border_label(put, table_y + table_height - 1, table_x + table_width - len(position) - 3, position, cyan, bottom=True)
         segments = loss_segments(table_width)
@@ -593,24 +695,33 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         put(table_y + 1, table_x + 2,
             f"{'ALVO':<{name_width}} {'ESTADO':<8} {'RTT':>9} {'PERDA':>{6 + meter_width}}", bold)
         visible = table_height - 3
-        start = max(0, selected - visible + 1)
-        for index, monitor in enumerate(monitors[start:start + visible], start):
+        rows = target_tree(monitors, visible > 1)
+        selected_row = next((row for row, (index, _) in enumerate(rows) if index == selected), 0)
+        start = max(0, selected_row - visible + 1)
+        for row, (index, label) in enumerate(rows[start:start + visible], table_y + 2):
+            if index is None:
+                put(row, table_x + 2, label[:name_width], cyan | bold)
+                continue
+            monitor = monitors[index]
+            hit(row, table_x + 1, table_width - 2, "target", index)
             style = {"OK": green, "AGUARDE": yellow}.get(monitor.status, red)
             if index == selected:
                 style |= curses.A_REVERSE
             last = monitor.history[-1] if monitor.history else None
             latency = f"{last:.2f} ms" if last is not None else "—"
             loss = f"{monitor.lost / monitor.sent:.0%}" if monitor.sent else "—"
-            row = table_y + 2 + index - start
-            prefix = f"{monitor.host[:name_width]:<{name_width}} {monitor.status:<8} {latency:>9} "
+            prefix = f"{label[:name_width]:<{name_width}} {monitor.status:<8} {latency:>9} "
             put(row, table_x + 2, prefix + " " * meter_width + f"{loss:>6}", style)
             draw_loss_meter(put, row, table_x + 2 + len(prefix), monitor, segments,
                             purple, yellow, red, style & curses.A_REVERSE)
 
     if wide or route_focus:
+        hit(route_y, route_x, route_width, "hops", height=route_height)
         panel(put, route_y, route_x, route_height, route_width, "4 Tracert / ICMP", red)
         route_action = " t parar " if route_enabled else " t iniciar "
         border_label(put, route_y + route_height - 1, route_x + route_width - len(route_action) - 3, route_action, red, bottom=True)
+        hit(route_y + route_height - 1, route_x + route_width - len(route_action) - 3,
+            len(route_action) + 2, "key", ord("t"))
         if hops:
             position = f" {hop_index + 1}/{len(hops)} "
             border_label(put, route_y + route_height - 1, route_x + 2, position, red, bottom=True)
@@ -637,6 +748,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
             loss = f"{hop.lost / hop.sent:.0%}" if hop.sent else "—"
             rtts = " ".join(f"{value:>{rtt_width}}" for value in times)
             row = route_y + 2 + index - start
+            hit(row, route_x + 1, route_width - 2, "hop", index)
             prefix = f"{ttl:2} {label[:name_width]:<{name_width}} {rtts} "
             put(row, route_x + 2, prefix + " " * (loss_width - 5) + f"{loss:>5}", style)
             draw_loss_meter(put, row, route_x + 2 + len(prefix), hop, segments,
@@ -652,12 +764,14 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         ("Tab", "Foco"),
         ("a", "Adic." if wide else "+"),
         ("d", "Rem." if wide else "−"),
+        ("n", "DNS"),
         ("q", "Sair"),
     )
     x = 1
     for key, action in actions:
         put(height - 1, x, key, cyan | bold)
         put(height - 1, x + len(key) + 1, action, curses.A_DIM)
+        hit(height - 1, x, len(key) + len(action) + 1, "key", 9 if key == "Tab" else ord(key))
         x += len(key) + len(action) + 3
     return max(1, visible_hops if route_focus else table_height - 3)
 
@@ -669,6 +783,11 @@ def dashboard(screen, hosts, interval, versions=()):
         curses.set_escdelay(35)
     screen.timeout(150)
     default_fg, default_bg = curses.COLOR_WHITE, curses.COLOR_BLACK
+    wheel_up = getattr(curses, "BUTTON4_PRESSED", 0)
+    wheel_down = getattr(curses, "BUTTON5_PRESSED", 0)
+    click = curses.BUTTON1_PRESSED
+    curses.mousemask(click | wheel_up | wheel_down)
+    curses.mouseinterval(0)
     if curses.has_colors():
         curses.start_color()
         try:
@@ -714,10 +833,15 @@ def dashboard(screen, hosts, interval, versions=()):
     theme = next(iter(THEMES))
     apply_theme(theme)
 
-    monitors = [Monitor(host) for host in hosts]
+    monitors = [Monitor(host, group=group) for host, group in hosts]
     selected = 0
     query = ""
     filter_edit = None
+    lookup_query = lookup_pending = None
+    lookup_server = ""
+    lookup_field = 0
+    lookup_output = []
+    lookup_offset = 0
     target_state = 0
     reverse = False
     next_probe = 0
@@ -732,7 +856,7 @@ def dashboard(screen, hosts, interval, versions=()):
     next_trace = 0
     hops = []
     hop_index = 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool, ThreadPoolExecutor(max_workers=1) as routes:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool, ThreadPoolExecutor(max_workers=1) as routes, ThreadPoolExecutor(max_workers=1) as dns:
         while True:
             now = time.monotonic()
             if now >= next_probe:
@@ -778,6 +902,11 @@ def dashboard(screen, hosts, interval, versions=()):
             if target and route_pending is None and now >= next_trace:
                 route_pending = (route_generation, routes.submit(trace, target.address or target.host))
 
+            if lookup_pending is not None and lookup_pending.done():
+                lookup_output = lookup_pending.result()
+                lookup_pending = None
+                lookup_offset = 0
+
             screen.erase()
             height, width = screen.getmaxyx()
 
@@ -791,7 +920,7 @@ def dashboard(screen, hosts, interval, versions=()):
                 menu = None
 
             def background(y, x, value, style=0):
-                put(y, x, value, curses.A_DIM if menu else style)
+                put(y, x, value, curses.A_DIM if menu or lookup_query is not None else style)
 
             view_message = message
             if filter_edit is not None:
@@ -799,17 +928,91 @@ def dashboard(screen, hosts, interval, versions=()):
             elif query:
                 view_message = f"{message}  ·  Filtro: {query}" if message else f"Filtro: {query}"
             view_index = indices.index(selected) if indices else 0
+            hits = []
             page = draw_dashboard(background, height, width, [monitors[i] for i in indices],
                                   view_index, interval, view_message, hops, hop_index, route_focus,
                                   route_message, route_enabled, ping_enabled, graph_mode,
-                                  query, target_state, reverse, len(monitors), shaded_history)
+                                  query, target_state, reverse, len(monitors), shaded_history, versions, hits)
             if menu:
-                draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background)
+                hits.clear()
+                draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background, hits)
+            if lookup_query is not None:
+                hits.clear()
+                lookup_page = draw_lookup(put, height, width, lookup_query, lookup_server, lookup_field,
+                                          lookup_output, lookup_offset, lookup_pending is not None)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
-                filter_edit = None
+                filter_edit = lookup_query = None
                 key = ord("q")
+            if lookup_query is not None:
+                if key == 27:
+                    lookup_query = None
+                elif key in (10, 13, curses.KEY_ENTER) and lookup_pending is None:
+                    lookup_offset = 0
+                    lookup_pending = dns.submit(dns_lookup, lookup_query.strip(), lookup_server.strip())
+                elif key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                    delta = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                             curses.KEY_PPAGE: -lookup_page, curses.KEY_NPAGE: lookup_page}[key]
+                    lookup_offset = max(0, min(len(lookup_output) - lookup_page, lookup_offset + delta))
+                elif key in (9, curses.KEY_BTAB):
+                    lookup_field = 1 - lookup_field
+                elif key in (8, 127, curses.KEY_BACKSPACE, curses.KEY_DC) or 32 <= key <= 126:
+                    text = lookup_server if lookup_field else lookup_query
+                    if key in (8, 127, curses.KEY_BACKSPACE):
+                        text = text[:-1]
+                    elif key == curses.KEY_DC:
+                        text = ""
+                    elif len(text) < 253:
+                        text += chr(key)
+                    if lookup_field:
+                        lookup_server = text
+                    else:
+                        lookup_query = text
+                elif key == curses.KEY_MOUSE:
+                    try:
+                        curses.getmouse()
+                    except curses.error:
+                        pass
+                continue
+            if key == curses.KEY_MOUSE:
+                try:
+                    _, mx, my, _, buttons = curses.getmouse()
+                except curses.error:
+                    continue
+                if filter_edit is not None:
+                    continue
+                matches = [
+                    (kind, value) for y, x, rows, cols, kind, value in reversed(hits)
+                    if y <= my < y + rows and x <= mx < x + cols
+                ]
+                if not matches:
+                    continue
+                if buttons & (wheel_up | wheel_down):
+                    panel_kind = next((kind for kind, _ in matches if kind in ("targets", "hops")), None)
+                    if panel_kind is None:
+                        continue
+                    route_focus = panel_kind == "hops" and route_enabled
+                    if panel_kind == "hops" and not route_focus:
+                        continue
+                    key = curses.KEY_UP if buttons & wheel_up else curses.KEY_DOWN
+                elif buttons & click:
+                    kind, value = matches[0]
+                    if kind == "target":
+                        selected, route_focus = indices[value], False
+                        continue
+                    if kind == "hop":
+                        hop_index, route_focus = value, True
+                        continue
+                    if kind == "menu":
+                        menu_index = value
+                        key = curses.KEY_RIGHT if menu == "Opções" else 10
+                    elif kind == "key":
+                        key = value
+                    else:
+                        continue
+                else:
+                    continue
             if filter_edit is not None:
                 if key == 27:
                     query, selected = filter_edit
@@ -879,12 +1082,27 @@ def dashboard(screen, hosts, interval, versions=()):
                     if monitor.pending is not None:
                         monitor.pending.cancel()
                 return
-            if key in (ord("f"), ord("/")):
+            if key == ord("n") and width >= 24 and height >= 9:
+                if lookup_pending is not None:
+                    message = "A consulta DNS anterior ainda está em andamento."
+                    continue
+                lookup_query = ""
+                lookup_field = 0
+                if indices:
+                    monitor = monitors[selected]
+                    lookup_query = monitor.group or monitor.host
+                lookup_output = []
+                lookup_offset = 0
+            elif key in (ord("f"), ord("/")):
                 filter_edit = (query, selected)
                 route_focus = False
                 message = ""
             elif key == curses.KEY_DC:
                 query = ""
+            elif key == ord("v"):
+                options = tuple(FAMILIES)
+                versions = options[(options.index(versions) + 1) % len(options)]
+                message = f"Novos alvos: {FAMILIES[versions]}"
             elif key == ord("r"):
                 reverse = not reverse
                 route_focus = False
@@ -933,8 +1151,8 @@ def dashboard(screen, hosts, interval, versions=()):
                     curses.curs_set(0)
                     screen.timeout(150)
                 try:
-                    existing = {monitor.host for monitor in monitors}
-                    additions = [item for item in load_targets(host, versions) if item not in existing]
+                    existing = {(monitor.host, monitor.group) for monitor in monitors}
+                    additions = [item for item in grouped_targets(host, versions) if item not in existing]
                     if not additions:
                         message = "Todos os alvos já estão na lista."
                     elif len(monitors) + len(additions) > MAX_TARGETS:
@@ -942,7 +1160,7 @@ def dashboard(screen, hosts, interval, versions=()):
                     else:
                         route_focus = False
                         selected = len(monitors)
-                        monitors.extend(Monitor(item) for item in additions)
+                        monitors.extend(Monitor(item, group=group) for item, group in additions)
                         next_probe = 0
                         message = f"{len(additions)} alvo(s) adicionado(s)."
                 except ValueError as error:
@@ -964,7 +1182,7 @@ def main():
     hosts = {}
     try:
         for value in args.hosts:
-            hosts.update(dict.fromkeys(load_targets(value, versions)))
+            hosts.update(dict.fromkeys(grouped_targets(value, versions)))
             if len(hosts) > MAX_TARGETS:
                 raise ValueError(f"informe até {MAX_TARGETS} alvos")
     except ValueError as error:

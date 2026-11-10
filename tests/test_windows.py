@@ -31,3 +31,14 @@ class WindowsParsersTest(unittest.TestCase):
                                      (None, None, None)))
         self.assertEqual(hops[1][1], ((None, None, None),) * 3)
         self.assertEqual(hops[2][1][2], ("2001:db8::1", "2001:db8::1", 6.0))
+
+    def test_nslookup_passes_selected_server_to_native_command(self):
+        from subprocess import CompletedProcess
+        from unittest.mock import Mock, patch
+
+        lookup = APP["dns_lookup"]
+        native = Mock(return_value=CompletedProcess([], 0, "Server: 192.0.2.53\n", ""))
+        with patch.dict(lookup.__globals__, {"WINDOWS": True, "windows_command": native}):
+            self.assertEqual(lookup("example.test", "192.0.2.53"), ["Server: 192.0.2.53"])
+        native.assert_called_once_with("nslookup.exe", "-timeout=2", "-retry=1",
+                                       "example.test", "192.0.2.53", timeout=7)
