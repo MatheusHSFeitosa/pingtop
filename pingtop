@@ -10,6 +10,7 @@ import socket
 import subprocess
 import time
 import textwrap
+import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -171,6 +172,7 @@ def local_network():
 
 
 SNMP_CHOICES = {
+    "operation": ("GET", "BULK", "WALK"),
     "version": ("2c", "3"),
     "level": ("noAuthNoPriv", "authNoPriv", "authPriv"),
     "auth": ("SHA", "SHA-256", "MD5"),
@@ -180,7 +182,8 @@ SNMP_SECRETS = ("community", "auth_password", "privacy_password")
 
 
 def snmp_fields(config):
-    fields = [("host", "Host ou IP"), ("port", "Porta UDP"), ("version", "Versão")]
+    fields = [("host", "Host ou IP"), ("port", "Porta UDP"), ("version", "Versão"),
+              ("operation", "Operação")]
     if config["version"] == "2c":
         fields.append(("community", "Community"))
     else:
@@ -189,7 +192,9 @@ def snmp_fields(config):
             fields += [("auth", "Autenticação"), ("auth_password", "Senha auth")]
         if config["level"] == "authPriv":
             fields += [("privacy", "Criptografia"), ("privacy_password", "Senha priv")]
-    return fields + [("oid", "OID")]
+    if config.get("operation") == "BULK":
+        fields.append(("repetitions", "Repetições"))
+    return fields + [("oid", "OID / raiz")]
 
 
 def snmp_command(config):
@@ -199,12 +204,16 @@ def snmp_command(config):
     if not config["port"].isdigit() or not 1 <= int(config["port"]) <= 65535:
         raise ValueError("Informe uma porta UDP entre 1 e 65535.")
     oid = config["oid"].strip()
-    if not re.fullmatch(r"\.?[0-9]+(?:\.[0-9]+)+", oid):
+    if not re.fullmatch(r"\.?[0-9]+(?:\.[0-9]+)*", oid):
         raise ValueError("Use um OID numérico, como .1.3.6.1.2.1.1.1.0.")
     version = config["version"]
     if version not in SNMP_CHOICES["version"]:
         raise ValueError("Escolha SNMP 2c ou 3.")
-    command = ["snmpget", "-v", version, "-t", "2", "-r", "0", "-m", "", "-On"]
+    operation = config.get("operation", "GET")
+    tools = {"GET": "snmpget", "BULK": "snmpbulkget", "WALK": "snmpwalk"}
+    if operation not in tools:
+        raise ValueError("Escolha GET, BULK ou WALK.")
+    command = [tools[operation], "-v", version, "-t", "2", "-r", "0", "-m", "", "-On"]
     if version == "2c":
         if not config["community"]:
             raise ValueError("Informe a community.")
@@ -221,31 +230,62 @@ def snmp_command(config):
                 if config[protocol] not in SNMP_CHOICES[protocol] or len(config[password]) < 8:
                     raise ValueError("Escolha o protocolo e uma senha com pelo menos 8 caracteres.")
                 command += [f"-{flag}", config[protocol], f"-{flag.upper()}", config[password]]
+    if operation == "BULK":
+        repetitions = config.get("repetitions", "10")
+        if not repetitions.isdigit() or not 1 <= int(repetitions) <= 100:
+            raise ValueError("Repetições BULK devem ficar entre 1 e 100.")
+        command += ["-Cn0", f"-Cr{int(repetitions)}"]
     destination = f"udp6:[{host}]:{config['port']}" if ":" in host else f"udp:{host}:{config['port']}"
     return command + [destination, oid]
 
 
-def snmp_get(config):
+def snmp_output(output, config):
+    for field in SNMP_SECRETS:
+        if config[field]:
+            output = output.replace(config[field], "********")
+    return ["".join(char for char in line.expandtabs(4) if char.isprintable())
+            for line in output.splitlines()]
+
+
+def snmp_get(config, cancel=None, live=None):
     try:
         command = snmp_command(config)
     except ValueError as error:
         return [str(error)]
     started = time.monotonic()
     try:
-        result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=6)
+        if config.get("operation") == "WALK":
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+                while True:
+                    if cancel is not None and cancel.is_set():
+                        process.terminate()
+                        try:
+                            raw, _ = process.communicate(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            raw, _ = process.communicate()
+                        status = "WALK cancelado"
+                        break
+                    try:
+                        raw, _ = process.communicate(timeout=0.2)
+                    except subprocess.TimeoutExpired as partial:
+                        if live is not None:
+                            live[:] = snmp_output((partial.output or b"").decode(errors="replace"), config)
+                        continue
+                    status = "WALK concluído" if process.returncode == 0 else "WALK interrompido por erro"
+                    break
+                result = subprocess.CompletedProcess(command, process.returncode, raw.decode(errors="replace"), "")
+        else:
+            result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=6)
+            status = "Resposta recebida" if result.returncode == 0 else "Consulta falhou"
     except FileNotFoundError:
-        return ["Instale o pacote snmp para disponibilizar o snmpget."]
+        return [f"Instale o pacote snmp para disponibilizar {command[0]}."]
     except subprocess.TimeoutExpired:
         return ["Tempo limite da consulta SNMP excedido."]
     except OSError:
-        return ["Não foi possível executar o snmpget."]
-    status = "Resposta recebida" if result.returncode == 0 else "Consulta falhou"
+        return [f"Não foi possível executar {command[0]}."]
     output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
-    for field in SNMP_SECRETS:
-        if config[field]:
-            output = output.replace(config[field], "********")
-    lines = ["".join(char for char in line.expandtabs(4) if char.isprintable())
-             for line in output.splitlines()]
+    lines = snmp_output(output, config)
     return [f"{status} · {config['host']}:{config['port']} · {time.monotonic() - started:.2f} s", *lines]
 
 
@@ -631,7 +671,7 @@ def draw_snmp(put, height, width, config, field, output, offset, busy, hits):
     box_width, box_height = min(98, width - 4), min(30, height - 2)
     y, x = (height - box_height) // 2, (width - box_width) // 2
     accent = curses.color_pair(1)
-    panel(put, y, x, box_height, box_width, "SNMP / GET", accent)
+    panel(put, y, x, box_height, box_width, f"SNMP / {config.get('operation', 'GET')}", accent)
     fields = snmp_fields(config)
     capacity = min(len(fields), box_height - 7)
     start = max(0, field - capacity + 1)
@@ -648,12 +688,12 @@ def draw_snmp(put, height, width, config, field, output, offset, busy, hits):
         hits.append((row, x + 2, 1, box_width - 4, "snmp_field", index))
     result_y = y + capacity + 2
     page = y + box_height - 2 - result_y
-    lines = ["Consultando SNMP…"] if busy else output or ["Preencha os campos e pressione Enter."]
+    lines = ["Consultando SNMP…", *output] if busy else output or ["Preencha os campos e pressione Enter."]
     lines = [part for line in lines for part in (textwrap.wrap(line, box_width - 4) or [""])]
     offset = min(offset, max(0, len(lines) - page))
     for row, line in enumerate(lines[offset:offset + page], result_y):
         put(row, x + 2, line[:box_width - 4])
-    hint = "Tab Campo  ←→ Escolha  Enter GET  Pg↑↓ Rolar  Esc Fechar"
+    hint = "Tab Campo  ←→ Escolha  Enter Consultar  Pg↑↓ Rolar  Ctrl+X Parar  Esc Fechar"
     put(y + box_height - 2, x + 2, hint[:box_width - 4], accent)
     return max(1, page), len(lines)
 
@@ -940,9 +980,11 @@ def dashboard(screen, hosts, interval, versions=()):
     lookup_offset = 0
     snmp_open = False
     snmp_pending = None
+    snmp_cancel = threading.Event()
+    snmp_live = []
     snmp_field = snmp_offset = 0
     snmp_output = []
-    snmp_config = dict(host="", port="161", version="2c", community="", username="",
+    snmp_config = dict(host="", port="161", version="2c", operation="GET", repetitions="10", community="", username="",
                        level="noAuthNoPriv", auth="SHA", auth_password="",
                        privacy="AES", privacy_password="", oid=".1.3.6.1.2.1.1.1.0")
     network_open = False
@@ -1080,18 +1122,23 @@ def dashboard(screen, hosts, interval, versions=()):
             if snmp_open:
                 hits.clear()
                 snmp_page, snmp_lines = draw_snmp(put, height, width, snmp_config, snmp_field,
-                                      snmp_output, snmp_offset, snmp_pending is not None, hits)
+                                      snmp_live if snmp_pending is not None else snmp_output,
+                                      snmp_offset, snmp_pending is not None, hits)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
                 filter_edit = lookup_query = None
                 network_open = snmp_open = False
+                snmp_cancel.set()
                 key = ord("q")
             if snmp_open:
                 fields = snmp_fields(snmp_config)
                 name = fields[snmp_field][0]
                 if key == 27:
+                    snmp_cancel.set()
                     snmp_open = False
+                elif key == 24:
+                    snmp_cancel.set()
                 elif key in (9, curses.KEY_BTAB, curses.KEY_UP, curses.KEY_DOWN):
                     delta = -1 if key in (curses.KEY_BTAB, curses.KEY_UP) else 1
                     snmp_field = (snmp_field + delta) % len(fields)
@@ -1099,10 +1146,14 @@ def dashboard(screen, hosts, interval, versions=()):
                     choices = SNMP_CHOICES[name]
                     delta = 1 if key == curses.KEY_RIGHT else -1
                     snmp_config[name] = choices[(choices.index(snmp_config[name]) + delta) % len(choices)]
+                    if name == "operation" and snmp_config["oid"] in (".1", ".1.3.6.1.2.1.1.1.0"):
+                        snmp_config["oid"] = ".1.3.6.1.2.1.1.1.0" if snmp_config[name] == "GET" else ".1"
                     snmp_field = min(snmp_field, len(snmp_fields(snmp_config)) - 1)
                 elif key in (10, 13, curses.KEY_ENTER) and snmp_pending is None:
                     snmp_offset = 0
-                    snmp_pending = snmp.submit(snmp_get, dict(snmp_config))
+                    snmp_cancel.clear()
+                    snmp_live.clear()
+                    snmp_pending = snmp.submit(snmp_get, dict(snmp_config), snmp_cancel, snmp_live)
                 elif key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
                     delta = snmp_page if key == curses.KEY_NPAGE else -snmp_page
                     snmp_offset = max(0, min(snmp_lines - snmp_page, snmp_offset + delta))
@@ -1274,6 +1325,7 @@ def dashboard(screen, hosts, interval, versions=()):
                 if key != ord("q"):
                     continue
             if key == ord("q"):
+                snmp_cancel.set()
                 for monitor in monitors:
                     if monitor.pending is not None:
                         monitor.pending.cancel()

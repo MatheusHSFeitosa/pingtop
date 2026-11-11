@@ -88,7 +88,7 @@ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e 
 | Delete | Limpar filtro de texto |
 | p | Pausar ou retomar o ping contínuo de todos os alvos |
 | i | Abrir detalhes da rede local |
-| g | Abrir teste SNMP GET |
+| g | Abrir consultas SNMP GET, BULK e WALK |
 | n | Abrir NSLOOKUP |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
@@ -158,16 +158,28 @@ rotas vêm do comando `ip`, e o DNS vem do `resolvectl` ou de
 ## SNMP
 
 Pressione `g` ou clique em **g SNMP** para consultar o equipamento selecionado.
-A consulta usa SNMP GET e começa pelo OID `sysDescr.0`
-(`.1.3.6.1.2.1.1.1.0`). Você pode editar o alvo, a porta UDP e o OID numérico.
+No campo **Operação**, use ←/→ para escolher.
 
-Use Tab para alternar os campos, ←/→ para mudar as opções e Enter para
-consultar. PgUp/PgDn rolam a resposta e Esc fecha o painel. Em SNMP v2c,
-informe a community. Em SNMP v3, escolha o usuário, nível de segurança e,
-conforme o nível, os protocolos e senhas de autenticação e criptografia.
+- **GET** consulta um objeto, começando pelo OID `sysDescr.0`
+  (`.1.3.6.1.2.1.1.1.0`).
+- **BULK** executa GETBULK a partir do OID informado. O campo **Repetições**
+  controla o máximo de objetos retornados na requisição, de 1 a 100.
+- **WALK** percorre a árvore completa acessível a partir da raiz informada.
+  A raiz `.1` percorre os objetos acessíveis ao usuário ou à community.
+  Para limitar a uma subárvore, informe sua raiz numérica.
+
+Ao mudar de GET para BULK/WALK, o OID inicial padrão muda para `.1`.
+Use Tab para alternar campos e Enter para consultar. Durante o WALK, as
+respostas aparecem no painel conforme chegam. PgUp/PgDn rolam o resultado,
+Ctrl+X interrompe a consulta e preserva os resultados já coletados, e Esc
+interrompe e fecha o painel. O WALK prossegue até terminar, ocorrer um erro
+ou você cancelar.
+
+Em SNMP v2c, informe a community. Em SNMP v3, escolha o usuário, nível de
+segurança e os protocolos e senhas exigidos pelo nível selecionado.
 Os campos sensíveis aparecem ocultos e as configurações duram a sessão.
-
-Requer `snmpget`, disponível no pacote `snmp` no Debian/Ubuntu.
+Requer `snmpget`, `snmpbulkget` e `snmpwalk`, disponíveis no pacote `snmp`
+no Debian/Ubuntu.
 
 ## NSLOOKUP
 
