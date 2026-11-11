@@ -157,7 +157,7 @@ rotas vêm do comando `ip`, e o DNS vem do `resolvectl` ou de
 
 ## SNMP
 
-Pressione `g` ou clique em **g SNMP** para consultar o equipamento selecionado.
+Abra **Esc → SNMP**, pressione `g` ou clique em **g SNMP** para consultar o equipamento selecionado.
 No campo **Operação**, use ←/→ para escolher.
 
 - **GET** consulta um objeto, começando pelo OID `sysDescr.0`
