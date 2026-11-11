@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+VERSION = "0.13.0-windows.5"
+
 TARGET = re.compile(r"[a-zA-Z0-9:][a-zA-Z0-9_.:%-]{0,252}")
 LATENCY = re.compile(r"time[=<]([\d.]+)\s*ms")
 MAX_TARGETS = 1024
@@ -721,7 +723,7 @@ def draw_graph(put, y, width, height, monitor, green, red, dim, graph_mode="Micr
         put(y + height - 2, graph_x, compact[:graph_width], dim)
 
 
-MENU_ITEMS = ("Opções", "Ajuda", "Limpar lista", "Sair")
+MENU_ITEMS = ("Opções", "Ajuda", "Limpar lista", "SNMP", "Sair")
 THEMES = {
     "Discreto": ((67, 114, 179, 167, 103), (153, 111, 68, 61)),
     "Drácula": ((117, 84, 228, 203, 141), (212, 141, 117, 84)),
@@ -1039,7 +1041,7 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     )
     x = 1
     for key, action in actions:
-        if not wide:
+        if not wide and key != "g":
             action = ""
         put(height - 1, x, key, cyan | bold)
         put(height - 1, x + len(key) + 1, action, curses.A_DIM)
@@ -1428,6 +1430,9 @@ def dashboard(screen, hosts, interval, versions=()):
                     menu_index = 0
                     if menu == "Sair":
                         key = ord("q")
+                    elif menu == "SNMP":
+                        menu = None
+                        key = ord("g")
                 elif key in (10, 13, curses.KEY_ENTER) and menu == "Limpar lista":
                     if menu_index == 1:
                         for monitor in monitors:
@@ -1458,7 +1463,7 @@ def dashboard(screen, hosts, interval, versions=()):
                     else:
                         theme_background = not theme_background
                         apply_theme(theme)
-                if key != ord("q"):
+                if key not in (ord("q"), ord("g")):
                     continue
             if key == ord("q"):
                 snmp_cancel.set()
@@ -1467,6 +1472,7 @@ def dashboard(screen, hosts, interval, versions=()):
                         monitor.pending.cancel()
                 return
             if key == ord("g"):
+                menu = None
                 if snmp_pending is not None:
                     message = "A consulta SNMP anterior ainda está em andamento."
                     continue
@@ -1566,6 +1572,7 @@ def dashboard(screen, hosts, interval, versions=()):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"PINGTOP {VERSION}")
     parser.add_argument("hosts", nargs="*", metavar="ALVO")
     parser.add_argument("-4", dest="ipv4", action="store_true", help="sondar IPv4")
     parser.add_argument("-6", dest="ipv6", action="store_true", help="sondar IPv6")

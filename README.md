@@ -51,7 +51,7 @@ O atalho passa a usar a versão atualizada.
 ## Windows x64
 
 Baixe `pingtop.exe` em **Assets** na
-[prévia para Windows](https://github.com/MatheusHSFeitosa/pingtop/releases/tag/v0.13.0-windows.4).
+[prévia para Windows](https://github.com/MatheusHSFeitosa/pingtop/releases/tag/v0.13.0-windows.5).
 Abra o PowerShell na pasta do arquivo e execute.
 
 ```powershell
@@ -158,7 +158,7 @@ rotas vêm do comando `ip`, e o DNS vem do `resolvectl` ou de
 
 ## SNMP
 
-Pressione `g` ou clique em **g SNMP** para consultar o equipamento selecionado.
+Abra **Esc → SNMP**, pressione `g` ou clique em **g SNMP** para consultar o equipamento selecionado.
 No campo **Operação**, use ←/→ para escolher.
 
 - **GET** consulta um objeto, começando pelo OID `sysDescr.0`
