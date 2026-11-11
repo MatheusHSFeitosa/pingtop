@@ -2,15 +2,68 @@
 
 Monitor de ping para Linux com interface de terminal inspirada no [btop](https://github.com/aristocratos/btop). Acompanhe a latência, a perda e o histórico de até 1.024 alvos, com até 32 pings simultâneos.
 
-## Como rodar
+## Instalar no Linux
 
 Requer Python 3.10+, um terminal com suporte a UTF-8 e o comando `ping` do iputils (pacote `iputils-ping` no Debian/Ubuntu).
+
+No Ubuntu, Debian ou Pop!_OS, instale as ferramentas necessárias.
+
+```sh
+sudo apt update
+sudo apt install git python3 iputils-ping iproute2 traceroute dnsutils snmp
+```
+
+Clone o projeto e abra o painel.
 
 ```sh
 git clone https://github.com/MatheusHSFeitosa/pingtop.git
 cd pingtop
 ./pingtop 127.0.0.1 1.1.1.1 example.com
 ```
+
+### Usar o comando `pingtop` em qualquer pasta
+
+Dentro da pasta clonada, crie um atalho para o executável.
+
+```sh
+mkdir -p ~/.local/bin
+ln -s "$PWD/pingtop" ~/.local/bin/pingtop
+export PATH="$HOME/.local/bin:$PATH"
+pingtop 8.8.8.8
+```
+
+Para manter o PATH em sessões futuras, inclua a linha
+`export PATH="$HOME/.local/bin:$PATH"` em `~/.profile` caso ela ainda
+não esteja configurada. Mantenha a pasta clonada no mesmo lugar.
+
+### Atualizar
+
+Entre na pasta onde clonou o projeto e execute.
+
+```sh
+cd /caminho/para/pingtop
+git pull --ff-only
+pingtop
+```
+
+O atalho passa a usar a versão atualizada.
+
+## Windows x64
+
+Baixe `pingtop.exe` em **Assets** na
+[prévia para Windows](https://github.com/MatheusHSFeitosa/pingtop/releases/tag/v0.13.0-windows.3).
+Abra o PowerShell na pasta do arquivo e execute.
+
+```powershell
+.\pingtop.exe 8.8.8.8
+.\pingtop.exe 192.168.1.0/24
+```
+
+O executável pode ser aberto sem argumentos para adicionar alvos pela interface.
+A interface interativa ainda aguarda validação completa no Windows Terminal.
+Para atualizar, feche o programa e substitua o executável pelo da nova versão.
+
+## Exemplos de uso
 
 Aceita IPv4, IPv6, nomes de host, faixas IPv4 inclusivas e blocos CIDR IPv4.
 
@@ -35,6 +88,7 @@ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e 
 | Delete | Limpar filtro de texto |
 | p | Pausar ou retomar o ping contínuo de todos os alvos |
 | i | Abrir detalhes da rede local |
+| g | Abrir teste SNMP GET |
 | n | Abrir NSLOOKUP |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
@@ -100,6 +154,20 @@ O painel mostra a interface prioritária, endereços, gateway e DNS. Pressione
 A configuração é atualizada a cada dez segundos. No Linux, os endereços e
 rotas vêm do comando `ip`, e o DNS vem do `resolvectl` ou de
 `/etc/resolv.conf`.
+
+## SNMP
+
+Pressione `g` ou clique em **g SNMP** para consultar o equipamento selecionado.
+A consulta usa SNMP GET e começa pelo OID `sysDescr.0`
+(`.1.3.6.1.2.1.1.1.0`). Você pode editar o alvo, a porta UDP e o OID numérico.
+
+Use Tab para alternar os campos, ←/→ para mudar as opções e Enter para
+consultar. PgUp/PgDn rolam a resposta e Esc fecha o painel. Em SNMP v2c,
+informe a community. Em SNMP v3, escolha o usuário, nível de segurança e,
+conforme o nível, os protocolos e senhas de autenticação e criptografia.
+Os campos sensíveis aparecem ocultos e as configurações duram a sessão.
+
+Requer `snmpget`, disponível no pacote `snmp` no Debian/Ubuntu.
 
 ## NSLOOKUP
 
