@@ -5,13 +5,17 @@ import argparse
 import curses
 import ipaddress
 import os
+import json
 import re
 import socket
 import subprocess
 import time
+import textwrap
+import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
 
 TARGET = re.compile(r"[a-zA-Z0-9:][a-zA-Z0-9_.:%-]{0,252}")
@@ -156,6 +160,252 @@ def grouped_targets(value, versions=()):
         numeric = ":" in value or "/" in value or re.fullmatch(r"[0-9.]+(?:-[0-9.]+)?", value)
         group = value.casefold() if versions and not numeric else None
     return [(address, group) for address in addresses]
+
+
+def network_command(*args):
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def windows_network():
+    command = r"""
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$ErrorActionPreference = 'Stop'
+@(Get-NetIPConfiguration -All | ForEach-Object {
+    [pscustomobject]@{
+        name = $_.InterfaceAlias
+        state = [string]$_.NetAdapter.Status
+        ipv4 = @($_.IPv4Address | Where-Object { $_.IPAddress } | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
+        ipv6 = @($_.IPv6Address | Where-Object { $_.IPAddress } | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
+        gateways = @($_.IPv4DefaultGateway.NextHop; $_.IPv6DefaultGateway.NextHop) | Where-Object { $_ }
+        dns = @($_.DNSServer | ForEach-Object { $_.ServerAddresses })
+    }
+}) | ConvertTo-Json -Depth 5 -Compress
+"""
+    powershell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                              "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    try:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return [], ["Não foi possível ler a configuração de rede do Windows."]
+    if result.returncode:
+        return [], ["Não foi possível ler a configuração de rede do Windows."]
+    adapters = json.loads(result.stdout or "[]")
+    if isinstance(adapters, dict):
+        adapters = [adapters]
+    adapters.sort(key=lambda adapter: (not adapter.get("gateways"), adapter.get("state") != "Up"))
+    details, summary = [], []
+    for adapter in adapters:
+        title = f"{adapter['name']} · {'ativa' if adapter['state'] == 'Up' else 'inativa'}"
+        entries = []
+        for key, label in (("ipv4", "IPv4"), ("ipv6", "IPv6"), ("gateways", "Gateway"), ("dns", "DNS")):
+            values = adapter.get(key) or []
+            if isinstance(values, str):
+                values = [values]
+            entries.extend(f"{label}  {value}" for value in dict.fromkeys(values) if value)
+        details.append(title)
+        details.extend(f"  {'└─' if index == len(entries) - 1 else '├─'} {line}"
+                       for index, line in enumerate(entries))
+        if not summary:
+            compact = [title]
+            for label in ("IPv4", "Gateway", "DNS", "IPv6"):
+                line = next((entry for entry in entries if entry.startswith(label + " ")), None)
+                if line:
+                    compact.append(line)
+            summary = compact
+    return summary, details
+
+
+def local_network():
+    if WINDOWS:
+        return windows_network()
+    interfaces = json.loads(network_command("ip", "-j", "address", "show") or "[]")
+    routes = [
+        route for family in ("-4", "-6")
+        for route in json.loads(network_command("ip", "-j", family, "route", "show", "default") or "[]")
+    ]
+    gateways = {}
+    for route in sorted(routes, key=lambda route: route.get("metric", 0)):
+        if route.get("dev"):
+            gateways.setdefault(route["dev"], []).append(route.get("gateway", "direto"))
+
+    dns = {}
+    for line in network_command("resolvectl", "dns").splitlines():
+        match = re.match(r"^(?:Global|Link \d+ \(([^)]+)\)):\s*(.*)$", line)
+        if match and match[2]:
+            dns[match[1]] = match[2].split()
+    if not dns:
+        try:
+            resolver = Path("/etc/resolv.conf").read_text(errors="replace")
+        except OSError:
+            resolver = ""
+        dns[None] = re.findall(r"^\s*nameserver\s+(\S+)", resolver, re.MULTILINE)
+
+    interfaces = [interface for interface in interfaces if "LOOPBACK" not in interface.get("flags", ())]
+    interfaces.sort(key=lambda interface: (interface["ifname"] not in gateways,
+                                            "UP" not in interface.get("flags", ())))
+    details = []
+    summary = []
+    for interface in interfaces:
+        name = interface["ifname"]
+        state = "ativa" if "UP" in interface.get("flags", ()) else "inativa"
+        addresses = [
+            (item["family"], f'{item["local"]}/{item["prefixlen"]}')
+            for item in interface.get("addr_info", ()) if item.get("local")
+        ]
+        details.append(f"{name} · {state}")
+        entries = [f"{'IPv4' if family == 'inet' else 'IPv6'}  {address}"
+                   for family, address in addresses]
+        entries += [f"Gateway  {gateway}" for gateway in gateways.get(name, ())]
+        entries += [f"DNS  {server}" for server in dns.get(name, ())]
+        for index, entry in enumerate(entries):
+            branch = "└─" if index == len(entries) - 1 else "├─"
+            details.append(f"  {branch} {entry}")
+        if not summary:
+            summary = [f"{name} · {state}"]
+            for family in ("inet", "inet6"):
+                address = next((address for kind, address in addresses if kind == family), None)
+                if address:
+                    summary.append(f"{'IPv4' if family == 'inet' else 'IPv6'}  {address}")
+            if name in gateways:
+                summary.insert(min(2, len(summary)), f"GW  {gateways[name][0]}")
+            servers = dns.get(name) or dns.get(None)
+            if servers:
+                summary.insert(min(3, len(summary)), f"DNS  {servers[0]}")
+    if dns.get(None):
+        details += ["DNS do sistema", *[f"  {'└─' if index == len(dns[None]) - 1 else '├─'} {server}"
+                                      for index, server in enumerate(dns[None])]]
+        if not summary:
+            summary = [f"DNS  {dns[None][0]}"]
+    return summary, details
+
+
+SNMP_CHOICES = {
+    "operation": ("GET", "BULK", "WALK"),
+    "version": ("2c", "3"),
+    "level": ("noAuthNoPriv", "authNoPriv", "authPriv"),
+    "auth": ("SHA", "SHA-256", "MD5"),
+    "privacy": ("AES", "DES"),
+}
+SNMP_SECRETS = ("community", "auth_password", "privacy_password")
+
+
+def snmp_fields(config):
+    fields = [("host", "Host ou IP"), ("port", "Porta UDP"), ("version", "Versão"),
+              ("operation", "Operação")]
+    if config["version"] == "2c":
+        fields.append(("community", "Community"))
+    else:
+        fields += [("username", "Usuário"), ("level", "Segurança")]
+        if config["level"] != "noAuthNoPriv":
+            fields += [("auth", "Autenticação"), ("auth_password", "Senha auth")]
+        if config["level"] == "authPriv":
+            fields += [("privacy", "Criptografia"), ("privacy_password", "Senha priv")]
+    if config.get("operation") == "BULK":
+        fields.append(("repetitions", "Repetições"))
+    return fields + [("oid", "OID / raiz")]
+
+
+def snmp_command(config):
+    host = config["host"].strip()
+    if not TARGET.fullmatch(host):
+        raise ValueError("Informe um hostname ou IP válido.")
+    if not config["port"].isdigit() or not 1 <= int(config["port"]) <= 65535:
+        raise ValueError("Informe uma porta UDP entre 1 e 65535.")
+    oid = config["oid"].strip()
+    if not re.fullmatch(r"\.?[0-9]+(?:\.[0-9]+)*", oid):
+        raise ValueError("Use um OID numérico, como .1.3.6.1.2.1.1.1.0.")
+    version = config["version"]
+    if version not in SNMP_CHOICES["version"]:
+        raise ValueError("Escolha SNMP 2c ou 3.")
+    operation = config.get("operation", "GET")
+    tools = {"GET": "snmpget", "BULK": "snmpbulkget", "WALK": "snmpwalk"}
+    if operation not in tools:
+        raise ValueError("Escolha GET, BULK ou WALK.")
+    command = [tools[operation], "-v", version, "-t", "2", "-r", "0", "-m", "", "-On"]
+    if version == "2c":
+        if not config["community"]:
+            raise ValueError("Informe a community.")
+        command += ["-c", config["community"]]
+    else:
+        if not config["username"] or config["level"] not in SNMP_CHOICES["level"]:
+            raise ValueError("Informe o usuário e o nível de segurança.")
+        command += ["-u", config["username"], "-l", config["level"]]
+        for enabled, protocol, password, flag in (
+            (config["level"] != "noAuthNoPriv", "auth", "auth_password", "a"),
+            (config["level"] == "authPriv", "privacy", "privacy_password", "x"),
+        ):
+            if enabled:
+                if config[protocol] not in SNMP_CHOICES[protocol] or len(config[password]) < 8:
+                    raise ValueError("Escolha o protocolo e uma senha com pelo menos 8 caracteres.")
+                command += [f"-{flag}", config[protocol], f"-{flag.upper()}", config[password]]
+    if operation == "BULK":
+        repetitions = config.get("repetitions", "10")
+        if not repetitions.isdigit() or not 1 <= int(repetitions) <= 100:
+            raise ValueError("Repetições BULK devem ficar entre 1 e 100.")
+        command += ["-Cn0", f"-Cr{int(repetitions)}"]
+    destination = f"udp6:[{host}]:{config['port']}" if ":" in host else f"udp:{host}:{config['port']}"
+    return command + [destination, oid]
+
+
+def snmp_output(output, config):
+    for field in SNMP_SECRETS:
+        if config[field]:
+            output = output.replace(config[field], "********")
+    return ["".join(char for char in line.expandtabs(4) if char.isprintable())
+            for line in output.splitlines()]
+
+
+def snmp_get(config, cancel=None, live=None):
+    try:
+        command = snmp_command(config)
+    except ValueError as error:
+        return [str(error)]
+    started = time.monotonic()
+    process_options = {"creationflags": subprocess.CREATE_NO_WINDOW} if WINDOWS else {}
+    encoding = "oem" if WINDOWS else "utf-8"
+    try:
+        if config.get("operation") == "WALK":
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **process_options) as process:
+                while True:
+                    if cancel is not None and cancel.is_set():
+                        process.terminate()
+                        try:
+                            raw, _ = process.communicate(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            raw, _ = process.communicate()
+                        status = "WALK cancelado"
+                        break
+                    try:
+                        raw, _ = process.communicate(timeout=0.2)
+                    except subprocess.TimeoutExpired as partial:
+                        if live is not None:
+                            live[:] = snmp_output((partial.output or b"").decode(encoding, errors="replace"), config)
+                        continue
+                    status = "WALK concluído" if process.returncode == 0 else "WALK interrompido por erro"
+                    break
+                result = subprocess.CompletedProcess(command, process.returncode, raw.decode(encoding, errors="replace"), "")
+        else:
+            result = subprocess.run(command, capture_output=True, text=True, encoding=encoding, errors="replace", timeout=6, **process_options)
+            status = "Resposta recebida" if result.returncode == 0 else "Consulta falhou"
+    except FileNotFoundError:
+        return [f"Instale o Net-SNMP e adicione {command[0]}.exe ao PATH." if WINDOWS else
+                f"Instale o pacote snmp para disponibilizar {command[0]}."]
+    except subprocess.TimeoutExpired:
+        return ["Tempo limite da consulta SNMP excedido."]
+    except OSError:
+        return [f"Não foi possível executar {command[0]}."]
+    output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    lines = snmp_output(output, config)
+    return [f"{status} · {config['host']}:{config['port']} · {time.monotonic() - started:.2f} s", *lines]
 
 
 def dns_lookup(host, server=""):
@@ -543,6 +793,40 @@ def draw_lookup(put, height, width, query, server, field, output, offset, busy):
     return visible
 
 
+def draw_snmp(put, height, width, config, field, output, offset, busy, hits):
+    if width < 40 or height < 16:
+        put(0, 0, "Amplie para 40×16 para consultar SNMP.")
+        return 1, 0
+    box_width, box_height = min(98, width - 4), min(30, height - 2)
+    y, x = (height - box_height) // 2, (width - box_width) // 2
+    accent = curses.color_pair(1)
+    panel(put, y, x, box_height, box_width, f"SNMP / {config.get('operation', 'GET')}", accent)
+    fields = snmp_fields(config)
+    capacity = min(len(fields), box_height - 7)
+    start = max(0, field - capacity + 1)
+    for row, index in enumerate(range(start, min(len(fields), start + capacity)), y + 1):
+        name, label = fields[index]
+        value = config[name]
+        if name in SNMP_SECRETS:
+            value = "*" * len(value)
+        if name in SNMP_CHOICES:
+            value = f"‹ {value} ›"
+        value = value[-max(1, box_width - 19):]
+        line = f"{label:<13} {value}" + ("▏" if field == index and name not in SNMP_CHOICES else "")
+        put(row, x + 2, line[:box_width - 4], curses.A_REVERSE if field == index else 0)
+        hits.append((row, x + 2, 1, box_width - 4, "snmp_field", index))
+    result_y = y + capacity + 2
+    page = y + box_height - 2 - result_y
+    lines = ["Consultando SNMP…", *output] if busy else output or ["Preencha os campos e pressione Enter."]
+    lines = [part for line in lines for part in (textwrap.wrap(line, box_width - 4) or [""])]
+    offset = min(offset, max(0, len(lines) - page))
+    for row, line in enumerate(lines[offset:offset + page], result_y):
+        put(row, x + 2, line[:box_width - 4])
+    hint = "Tab Campo  ←→ Escolha  Enter Consultar  Pg↑↓ Rolar  Ctrl+X Parar  Esc Fechar"
+    put(y + box_height - 2, x + 2, hint[:box_width - 4], accent)
+    return max(1, page), len(lines)
+
+
 TARGET_STATES = ("Todos", "Com resposta", "Sem resposta")
 
 
@@ -600,7 +884,7 @@ def draw_loss_meter(put, row, x, monitor, segments, muted, warning, critical, se
 
 def draw_dashboard(put, height, width, monitors, selected, interval, message,
                    hops, hop_index, route_focus, route_message, route_enabled, ping_enabled, graph_mode="Micro",
-                   query="", target_state=0, reverse=False, total=None, shaded_history=False, versions=(), hits=None):
+                   query="", target_state=0, reverse=False, total=None, shaded_history=False, versions=(), hits=None, network_summary=()):
     cyan, green, yellow, red, purple = (curses.color_pair(n) for n in range(1, 6))
     bold = curses.A_BOLD
     if width < 48 or height < 16:
@@ -645,27 +929,11 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
     chart = current_hop if route_focus and current_hop else target
 
     if wide:
-        panel(put, 3, 0, split, details_width, "1 Alvo selecionado", purple)
-        if target:
-            last = target.history[-1] if target.history else None
-            rtt = f"{last:.2f} ms" if last is not None else "—"
-            loss = f"{target.lost / target.sent:.1%}" if target.sent else "—"
-            lines = (
-                (f"ALVO    {target.host}", bold),
-                (f"ESTADO  {target.status}   RTT {rtt}", green if target.status == "OK" else yellow),
-                (f"PERDA   {loss} ({target.lost}/{target.sent})", 0),
-                (f"ENVIOS  {target.sent}   RECEB. {target.sent - target.lost}", 0),
-                (f"PING    {target.stamp}", 0),
-            )
-            details = list(lines)
-            if route_focus and current_hop:
-                for index, (name, address, rtt) in enumerate(current_hop.route_probes, 1):
-                    response = "*" if rtt is None else f"{address} {rtt:.3f} ms"
-                    if name and name != address:
-                        response += f" · {name}"
-                    details.append((f"Sonda {index}  {response}", purple))
-            for row, (line, style) in enumerate(details[:split - 2], 4):
-                put(row, 2, line[:details_width - 4], style)
+        panel(put, 3, 0, split, details_width, "1 Rede local", purple)
+        border_label(put, 3 + split - 1, 2, "i detalhes", purple, bottom=True, hotkey=True)
+        hit(3 + split - 1, 2, 12, "key", ord("i"))
+        for row, line in enumerate(network_summary[:split - 2], 4):
+            put(row, 2, line[:details_width - 4], bold if row == 4 else 0)
     title = f"3 Gráfico / salto {hops[hop_index][0]}" if route_focus and current_hop else "3 Gráfico / alvo"
     if chart:
         title += f" · {chart.address or chart.host}"
@@ -764,11 +1032,15 @@ def draw_dashboard(put, height, width, monitors, selected, interval, message,
         ("Tab", "Foco"),
         ("a", "Adic." if wide else "+"),
         ("d", "Rem." if wide else "−"),
+        ("g", "SNMP"),
         ("n", "DNS"),
+        ("i", "Rede"),
         ("q", "Sair"),
     )
     x = 1
     for key, action in actions:
+        if not wide:
+            action = ""
         put(height - 1, x, key, cyan | bold)
         put(height - 1, x + len(key) + 1, action, curses.A_DIM)
         hit(height - 1, x, len(key) + len(action) + 1, "key", 9 if key == "Tab" else ord(key))
@@ -842,6 +1114,21 @@ def dashboard(screen, hosts, interval, versions=()):
     lookup_field = 0
     lookup_output = []
     lookup_offset = 0
+    snmp_open = False
+    snmp_pending = None
+    snmp_cancel = threading.Event()
+    snmp_live = []
+    snmp_field = snmp_offset = 0
+    snmp_output = []
+    snmp_config = dict(host="", port="161", version="2c", operation="GET", repetitions="10", community="", username="",
+                       level="noAuthNoPriv", auth="SHA", auth_password="",
+                       privacy="AES", privacy_password="", oid=".1.3.6.1.2.1.1.1.0")
+    network_open = False
+    network_offset = 0
+    network_pending = None
+    network_summary = ["Lendo configuração…"]
+    network_details = network_summary
+    next_network = 0
     target_state = 0
     reverse = False
     next_probe = 0
@@ -856,7 +1143,7 @@ def dashboard(screen, hosts, interval, versions=()):
     next_trace = 0
     hops = []
     hop_index = 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool, ThreadPoolExecutor(max_workers=1) as routes, ThreadPoolExecutor(max_workers=1) as dns:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool, ThreadPoolExecutor(max_workers=1) as routes, ThreadPoolExecutor(max_workers=1) as dns, ThreadPoolExecutor(max_workers=1) as network, ThreadPoolExecutor(max_workers=1) as snmp:
         while True:
             now = time.monotonic()
             if now >= next_probe:
@@ -902,6 +1189,22 @@ def dashboard(screen, hosts, interval, versions=()):
             if target and route_pending is None and now >= next_trace:
                 route_pending = (route_generation, routes.submit(trace, target.address or target.host))
 
+            if network_pending is not None and network_pending.done():
+                try:
+                    summary, details = network_pending.result()
+                except (ValueError, KeyError):
+                    summary, details = [], []
+                network_summary = summary or ["Configuração indisponível."]
+                network_details = details or network_summary
+                network_pending = None
+            if network_pending is None and now >= next_network:
+                network_pending = network.submit(local_network)
+                next_network = now + 10
+
+            if snmp_pending is not None and snmp_pending.done():
+                snmp_output = snmp_pending.result()
+                snmp_pending = None
+                snmp_offset = 0
             if lookup_pending is not None and lookup_pending.done():
                 lookup_output = lookup_pending.result()
                 lookup_pending = None
@@ -920,7 +1223,7 @@ def dashboard(screen, hosts, interval, versions=()):
                 menu = None
 
             def background(y, x, value, style=0):
-                put(y, x, value, curses.A_DIM if menu or lookup_query is not None else style)
+                put(y, x, value, curses.A_DIM if menu or lookup_query is not None or network_open or snmp_open else style)
 
             view_message = message
             if filter_edit is not None:
@@ -932,7 +1235,7 @@ def dashboard(screen, hosts, interval, versions=()):
             page = draw_dashboard(background, height, width, [monitors[i] for i in indices],
                                   view_index, interval, view_message, hops, hop_index, route_focus,
                                   route_message, route_enabled, ping_enabled, graph_mode,
-                                  query, target_state, reverse, len(monitors), shaded_history, versions, hits)
+                                  query, target_state, reverse, len(monitors), shaded_history, versions, hits, network_summary)
             if menu:
                 hits.clear()
                 draw_menu(put, height, width, menu, menu_index, interval, theme, graph_mode, theme_background, hits)
@@ -940,11 +1243,91 @@ def dashboard(screen, hosts, interval, versions=()):
                 hits.clear()
                 lookup_page = draw_lookup(put, height, width, lookup_query, lookup_server, lookup_field,
                                           lookup_output, lookup_offset, lookup_pending is not None)
+            if network_open and width >= 24 and height >= 9:
+                box_width, box_height = min(100, width - 4), min(28, height - 2)
+                y, x = (height - box_height) // 2, (width - box_width) // 2
+                accent = curses.color_pair(5)
+                panel(put, y, x, box_height, box_width, "Rede local", accent)
+                network_page = box_height - 3
+                network_offset = min(network_offset, max(0, len(network_details) - network_page))
+                for row, line in enumerate(network_details[network_offset:network_offset + network_page], y + 1):
+                    put(row, x + 2, line[:box_width - 4], curses.A_BOLD if not line.startswith(" ") else 0)
+                put(y + box_height - 2, x + 2, "↑↓ Rolar  Esc Fechar"[:box_width - 4], accent)
+            else:
+                network_page = 1
+            if snmp_open:
+                hits.clear()
+                snmp_page, snmp_lines = draw_snmp(put, height, width, snmp_config, snmp_field,
+                                      snmp_live if snmp_pending is not None else snmp_output,
+                                      snmp_offset, snmp_pending is not None, hits)
             try:
                 key = screen.getch()
             except KeyboardInterrupt:
                 filter_edit = lookup_query = None
+                network_open = snmp_open = False
+                snmp_cancel.set()
                 key = ord("q")
+            if snmp_open:
+                fields = snmp_fields(snmp_config)
+                name = fields[snmp_field][0]
+                if key == 27:
+                    snmp_cancel.set()
+                    snmp_open = False
+                elif key == 24:
+                    snmp_cancel.set()
+                elif key in (9, curses.KEY_BTAB, curses.KEY_UP, curses.KEY_DOWN):
+                    delta = -1 if key in (curses.KEY_BTAB, curses.KEY_UP) else 1
+                    snmp_field = (snmp_field + delta) % len(fields)
+                elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and name in SNMP_CHOICES:
+                    choices = SNMP_CHOICES[name]
+                    delta = 1 if key == curses.KEY_RIGHT else -1
+                    snmp_config[name] = choices[(choices.index(snmp_config[name]) + delta) % len(choices)]
+                    if name == "operation" and snmp_config["oid"] in (".1", ".1.3.6.1.2.1.1.1.0"):
+                        snmp_config["oid"] = ".1.3.6.1.2.1.1.1.0" if snmp_config[name] == "GET" else ".1"
+                    snmp_field = min(snmp_field, len(snmp_fields(snmp_config)) - 1)
+                elif key in (10, 13, curses.KEY_ENTER) and snmp_pending is None:
+                    snmp_offset = 0
+                    snmp_cancel.clear()
+                    snmp_live.clear()
+                    snmp_pending = snmp.submit(snmp_get, dict(snmp_config), snmp_cancel, snmp_live)
+                elif key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
+                    delta = snmp_page if key == curses.KEY_NPAGE else -snmp_page
+                    snmp_offset = max(0, min(snmp_lines - snmp_page, snmp_offset + delta))
+                elif key == curses.KEY_MOUSE:
+                    try:
+                        _, mx, my, _, buttons = curses.getmouse()
+                    except curses.error:
+                        continue
+                    if buttons & click:
+                        for y, x, rows, cols, kind, index in hits:
+                            if y <= my < y + rows and x <= mx < x + cols:
+                                snmp_field = index
+                                break
+                elif name not in SNMP_CHOICES:
+                    if key in (8, 127, curses.KEY_BACKSPACE):
+                        snmp_config[name] = snmp_config[name][:-1]
+                    elif key == curses.KEY_DC:
+                        snmp_config[name] = ""
+                    elif 32 <= key <= 126 and len(snmp_config[name]) < 253:
+                        snmp_config[name] += chr(key)
+                continue
+            if network_open:
+                if key in (27, ord("i")):
+                    network_open = False
+                elif key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                    delta = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                             curses.KEY_PPAGE: -network_page, curses.KEY_NPAGE: network_page}[key]
+                    network_offset = max(0, min(len(network_details) - network_page, network_offset + delta))
+                elif key == curses.KEY_MOUSE:
+                    try:
+                        _, _, _, _, buttons = curses.getmouse()
+                    except curses.error:
+                        continue
+                    if buttons & wheel_up:
+                        network_offset = max(0, network_offset - 1)
+                    elif buttons & wheel_down:
+                        network_offset = min(max(0, len(network_details) - network_page), network_offset + 1)
+                continue
             if lookup_query is not None:
                 if key == 27:
                     lookup_query = None
@@ -1078,11 +1461,24 @@ def dashboard(screen, hosts, interval, versions=()):
                 if key != ord("q"):
                     continue
             if key == ord("q"):
+                snmp_cancel.set()
                 for monitor in monitors:
                     if monitor.pending is not None:
                         monitor.pending.cancel()
                 return
-            if key == ord("n") and width >= 24 and height >= 9:
+            if key == ord("g"):
+                if snmp_pending is not None:
+                    message = "A consulta SNMP anterior ainda está em andamento."
+                    continue
+                snmp_open = True
+                snmp_field = snmp_offset = 0
+                snmp_output = []
+                if indices:
+                    snmp_config["host"] = monitors[selected].address or monitors[selected].host
+            elif key == ord("i") and width >= 24 and height >= 9:
+                network_open = True
+                network_offset = 0
+            elif key == ord("n") and width >= 24 and height >= 9:
                 if lookup_pending is not None:
                     message = "A consulta DNS anterior ainda está em andamento."
                     continue

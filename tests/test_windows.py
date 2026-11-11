@@ -42,3 +42,15 @@ class WindowsParsersTest(unittest.TestCase):
             self.assertEqual(lookup("example.test", "192.0.2.53"), ["Server: 192.0.2.53"])
         native.assert_called_once_with("nslookup.exe", "-timeout=2", "-retry=1",
                                        "example.test", "192.0.2.53", timeout=7)
+
+    @unittest.skipUnless(__import__('os').name == 'nt', 'Windows necessário')
+    def test_native_network_configuration(self):
+        summary, details = APP['windows_network']()
+        self.assertTrue(summary, details)
+        self.assertTrue(any('IPv4 ' in line for line in details), details)
+
+    @unittest.skipUnless(__import__('os').name == 'nt', 'Windows necessário')
+    def test_native_ipv4_loopback_ping(self):
+        result = APP['probe']('127.0.0.1')
+        self.assertEqual(result[0], 'OK', result)
+        self.assertEqual(result[2], '127.0.0.1')

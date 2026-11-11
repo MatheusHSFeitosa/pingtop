@@ -2,15 +2,68 @@
 
 Monitor de ping para Linux com interface de terminal inspirada no [btop](https://github.com/aristocratos/btop). Acompanhe a latência, a perda e o histórico de até 1.024 alvos, com até 32 pings simultâneos.
 
-## Como rodar
+## Instalar no Linux
 
 Requer Python 3.10+, um terminal com suporte a UTF-8 e o comando `ping` do iputils (pacote `iputils-ping` no Debian/Ubuntu).
+
+No Ubuntu, Debian ou Pop!_OS, instale as ferramentas necessárias.
+
+```sh
+sudo apt update
+sudo apt install git python3 iputils-ping iproute2 traceroute dnsutils snmp
+```
+
+Clone o projeto e abra o painel.
 
 ```sh
 git clone https://github.com/MatheusHSFeitosa/pingtop.git
 cd pingtop
 ./pingtop 127.0.0.1 1.1.1.1 example.com
 ```
+
+### Usar o comando `pingtop` em qualquer pasta
+
+Dentro da pasta clonada, crie um atalho para o executável.
+
+```sh
+mkdir -p ~/.local/bin
+ln -s "$PWD/pingtop" ~/.local/bin/pingtop
+export PATH="$HOME/.local/bin:$PATH"
+pingtop 8.8.8.8
+```
+
+Para manter o PATH em sessões futuras, inclua a linha
+`export PATH="$HOME/.local/bin:$PATH"` em `~/.profile` caso ela ainda
+não esteja configurada. Mantenha a pasta clonada no mesmo lugar.
+
+### Atualizar
+
+Entre na pasta onde clonou o projeto e execute.
+
+```sh
+cd /caminho/para/pingtop
+git pull --ff-only
+pingtop
+```
+
+O atalho passa a usar a versão atualizada.
+
+## Windows x64
+
+Baixe `pingtop.exe` em **Assets** na
+[prévia para Windows](https://github.com/MatheusHSFeitosa/pingtop/releases/tag/v0.13.0-windows.4).
+Abra o PowerShell na pasta do arquivo e execute.
+
+```powershell
+.\pingtop.exe 8.8.8.8
+.\pingtop.exe 192.168.1.0/24
+```
+
+O executável pode ser aberto sem argumentos para adicionar alvos pela interface.
+A interface interativa ainda aguarda validação completa no Windows Terminal.
+Para atualizar, feche o programa e substitua o executável pelo da nova versão.
+
+## Exemplos de uso
 
 Aceita IPv4, IPv6, nomes de host, faixas IPv4 inclusivas e blocos CIDR IPv4.
 
@@ -34,6 +87,8 @@ Use `-i 2` para definir um intervalo de dois segundos, ou abra sem argumentos e 
 | s | Alternar entre Todos, Com resposta e Sem resposta |
 | Delete | Limpar filtro de texto |
 | p | Pausar ou retomar o ping contínuo de todos os alvos |
+| i | Abrir detalhes da rede local |
+| g | Abrir consultas SNMP GET, BULK e WALK |
 | n | Abrir NSLOOKUP |
 | t | Iniciar ou parar o Tracert do alvo selecionado |
 | Tab | Alternar entre a lista de alvos e a de saltos |
@@ -92,6 +147,42 @@ Enter confirma o filtro de texto e Esc restaura o filtro anterior. Os alvos
 ocultos continuam sendo sondados. Sem resposta mostra alvos cujo último ping
 expirou.
 
+## Rede local
+
+O painel mostra a interface prioritária, endereços, gateway e DNS. Pressione
+`i` para abrir a árvore de interfaces, inclusive em terminais estreitos.
+A configuração é atualizada a cada dez segundos. No Windows, a coleta usa
+PowerShell e `Get-NetIPConfiguration`. No Linux, os endereços e
+rotas vêm do comando `ip`, e o DNS vem do `resolvectl` ou de
+`/etc/resolv.conf`.
+
+## SNMP
+
+Pressione `g` ou clique em **g SNMP** para consultar o equipamento selecionado.
+No campo **Operação**, use ←/→ para escolher.
+
+- **GET** consulta um objeto, começando pelo OID `sysDescr.0`
+  (`.1.3.6.1.2.1.1.1.0`).
+- **BULK** executa GETBULK a partir do OID informado. O campo **Repetições**
+  controla o máximo de objetos retornados na requisição, de 1 a 100.
+- **WALK** percorre a árvore completa acessível a partir da raiz informada.
+  A raiz `.1` percorre os objetos acessíveis ao usuário ou à community.
+  Para limitar a uma subárvore, informe sua raiz numérica.
+
+Ao mudar de GET para BULK/WALK, o OID inicial padrão muda para `.1`.
+Use Tab para alternar campos e Enter para consultar. Durante o WALK, as
+respostas aparecem no painel conforme chegam. PgUp/PgDn rolam o resultado,
+Ctrl+X interrompe a consulta e preserva os resultados já coletados, e Esc
+interrompe e fecha o painel. O WALK prossegue até terminar, ocorrer um erro
+ou você cancelar.
+
+Em SNMP v2c, informe a community. Em SNMP v3, escolha o usuário, nível de
+segurança e os protocolos e senhas exigidos pelo nível selecionado.
+Os campos sensíveis aparecem ocultos e as configurações duram a sessão.
+Requer `snmpget`, `snmpbulkget` e `snmpwalk`, disponíveis no pacote `snmp`
+no Debian/Ubuntu. No Windows, instale as ferramentas Net-SNMP e adicione
+`snmpget.exe`, `snmpbulkget.exe` e `snmpwalk.exe` ao PATH.
+
 ## NSLOOKUP
 
 Pressione `n` ou clique em **n DNS** para abrir a consulta. O alvo selecionado
@@ -112,7 +203,7 @@ mostra o número do salto, o nome ou IP três RTTs por ciclo em milissegundos e 
 
 ## Terminal e aparência
 
-Em uma janela de pelo menos 96 colunas por 20 linhas, os painéis de detalhes,
+Em uma janela de pelo menos 96 colunas por 20 linhas, os painéis de rede local,
 alvos, histórico/gráfico e Tracert aparecem juntos. A interface compacta
 usa pelo menos 48 colunas por 16 linhas e alterna as listas com `Tab`.
 
